@@ -24,7 +24,7 @@ import app as core
 from pretty_html_table import build_table
 
 st.set_page_config(page_title="Stock Analysis Dashboard",
-                   page_icon="ðŸ“ˆ", layout="wide")
+                   page_icon="📈", layout="wide")
 
 DATA_SOURCE = "Yahoo Finance. Not investment advice."
 
@@ -66,7 +66,7 @@ def page_candle():
     start = c2.date_input("Start", pd.Timestamp.today() - pd.Timedelta(days=180))
     end = c3.date_input("End", pd.Timestamp.today())
     if st.button("Generate chart", type="primary"):
-        with st.spinner("Fetching dataâ€¦"):
+        with st.spinner("Fetching data..."):
             data = core.yf.download(ticker.upper(), start=str(start), end=str(end),
                                     progress=False)
         if data.empty:
@@ -152,7 +152,7 @@ def page_seasonality():
     years = c2.number_input("Lookback (years)", 1, 50, 10)
     if st.button("Run seasonality", type="primary"):
         from datetime import datetime, timedelta, timezone
-        with st.spinner("Downloading monthly historyâ€¦"):
+        with st.spinner("Downloading monthly history..."):
             end_date = datetime.now(timezone.utc)
             start_date = end_date - timedelta(days=int(years) * 365)
             data = core.yf.download(ticker.upper(), start=start_date, end=end_date,
@@ -222,7 +222,7 @@ def page_custom():
                  '^GSPTSE': 'S&P/TSX Canada'}
         end_yf = (pd.Timestamp(end) + timedelta(days=1)).strftime("%Y-%m-%d")
         rows = []
-        prog = st.progress(0.0, text="Fetchingâ€¦")
+        prog = st.progress(0.0, text="Fetching...")
         for i, (sym, nm) in enumerate(names.items()):
             try:
                 g = core.get_custom_date_range_gain(
@@ -231,7 +231,7 @@ def page_custom():
                 g = None
             rows.append({"Index": nm, "Gain (%)": None if g is None or pd.isna(g)
                          else round(float(g), 2)})
-            prog.progress((i + 1) / len(names), text=f"{nm}â€¦")
+            prog.progress((i + 1) / len(names), text=f"{nm}...")
         prog.empty()
         df = pd.DataFrame(rows).sort_values("Gain (%)", ascending=False,
                                             na_position="last").reset_index(drop=True)
@@ -264,7 +264,7 @@ def page_nifty50():
         symbols = [f"{x}.NS" for x in df_csv["Symbol"].tolist()]
         end_yf = (pd.Timestamp(end) + timedelta(days=1)).strftime("%Y-%m-%d")
         rows = []
-        prog = st.progress(0.0, text="Fetching 50 symbolsâ€¦")
+        prog = st.progress(0.0, text="Fetching 50 symbols...")
         for i, sym in enumerate(symbols):
             try:
                 g = core.get_custom_date_range_gain(sym, str(start), end_yf)
@@ -312,7 +312,7 @@ PAGES = {
 }
 
 with st.sidebar:
-    st.title("ðŸ“ˆ Stock Analysis")
+    st.title("📈 Stock Analysis")
     choice = st.radio("Tool", list(PAGES), label_visibility="collapsed")
     st.divider()
     st.caption(DATA_SOURCE)
