@@ -1,5 +1,5 @@
 """
-Streamlit UI for the Stock Analysis Dashboard.
+Streamlit UI for the Analysis Dashboard.
 
 The six original analyses live in `stock-chart-app-main/app.py` (Flask + matplotlib).
 Rather than rewriting the strategy logic, this module imports that file's functions
@@ -23,7 +23,7 @@ import streamlit as st
 import app as core
 from pretty_html_table import build_table
 
-st.set_page_config(page_title="Stock Analysis Dashboard",
+st.set_page_config(page_title="Analysis Dashboard",
                    page_icon="📈", layout="wide")
 
 DATA_SOURCE = "Yahoo Finance. Not investment advice."
@@ -55,7 +55,7 @@ def decode_plot(plot_value):
 
 # --------------------------------------------------------------------- pages
 def page_home():
-    st.title("Stock Analysis Dashboard")
+    st.title("Analysis Dashboard")
     st.caption("Pick a tool from the sidebar.")
 
 
@@ -312,7 +312,7 @@ PAGES = {
 }
 
 with st.sidebar:
-    st.title("📈 Stock Analysis")
+    st.title("📈 Analysis")
     choice = st.radio("Tool", list(PAGES), label_visibility="collapsed")
     st.divider()
     st.caption(DATA_SOURCE)
