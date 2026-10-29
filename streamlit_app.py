@@ -204,7 +204,7 @@ def page_seasonality():
 
 
 def page_custom():
-    st.header("Custom Date Range â€” Global Indices")
+    st.header("Custom Date Range Global Indices")
     c1, c2 = st.columns(2)
     start = c1.date_input("Start", pd.Timestamp("2026-01-01"))
     end = c2.date_input("End", pd.Timestamp.today())
@@ -244,7 +244,7 @@ def page_custom():
                 ax.text(b.get_x() + b.get_width() / 2, g, f"{g:.2f}%",
                         ha="center", va="bottom" if g > 0 else "top", fontsize=10)
             ax.set_ylabel("Gain (%)")
-            ax.set_title(f"Equity indices {start} â†’ {end}")
+            ax.set_title(f"Equity indices {start} -> {end}")
             core.plt.xticks(rotation=45, ha="right")
             ax.grid(axis="y", linestyle="--", alpha=0.6)
             core.plt.tight_layout()
@@ -295,7 +295,7 @@ def page_nifty50():
                          annot_kws={"fontsize": 11}, linewidths=0.5,
                          linecolor="white",
                          cbar_kws={"label": "Gain (%)", "shrink": 0.8})
-        ax.set_title(f"Nifty 50 â€” {start} â†’ {end} (sorted by gain)")
+        ax.set_title(f"Nifty 50 - {start} -> {end} (sorted by gain)")
         core.plt.tight_layout()
         st.pyplot(fig)
         core.plt.close(fig)
@@ -307,7 +307,7 @@ PAGES = {
     "NSE Indices": page_nse,
     "World Indices": page_world,
     "Seasonality": page_seasonality,
-    "Custom Date Range": page_custom,
+    "Custom Date Range Global Indices": page_custom,
     "Candlestick Chart": page_candle,
 }
 
