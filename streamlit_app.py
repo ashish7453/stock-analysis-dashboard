@@ -1,4 +1,4 @@
-﻿"""
+"""
 Streamlit UI for the Stock Analysis Dashboard.
 
 The six original analyses live in `stock-chart-app-main/app.py` (Flask + matplotlib).
@@ -40,6 +40,19 @@ def show_html_table(html: str):
         st.markdown(html, unsafe_allow_html=True)
 
 
+def decode_plot(plot_value):
+    """analyze_indices returns a full 'data:image/png;base64,...' URI, which
+    st.image cannot consume. Strip it down to raw PNG bytes."""
+    if isinstance(plot_value, (bytes, bytearray)):
+        return bytes(plot_value)
+    if not isinstance(plot_value, str):
+        return plot_value
+    if plot_value.startswith("data:"):
+        plot_value = plot_value.split(",", 1)[-1]
+    import base64
+    return base64.b64decode(plot_value)
+
+
 # --------------------------------------------------------------------- pages
 def page_home():
     st.title("Stock Analysis Dashboard")
@@ -79,13 +92,13 @@ def page_candle():
 def _indices_page(route, indices, names, title):
     st.header(title)
     if st.button("Run analysis", type="primary"):
-        with st.spinner("Pulling 30/60/90-day returnsâ€¦"):
+        with st.spinner("Pulling 30/60/90-day returns..."):
             try:
-                table_html, plot_b64 = core.analyze_indices(indices, names, route)
+                table_html, plot_url = core.analyze_indices(indices, names, route)
             except Exception as e:
                 st.error(f"Error: {e}")
                 return
-        st.image("data:image/png;base64," + plot_b64,
+        st.image(decode_plot(plot_url),
                  caption="Weakest three indices by summed rank")
         show_html_table(table_html)
 
