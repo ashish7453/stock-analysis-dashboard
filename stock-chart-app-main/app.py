@@ -181,9 +181,11 @@ def analyze_indices(indices, index_names, route_name):
     buf = io.BytesIO()
     plt.savefig(buf, format='png', bbox_inches='tight')
     buf.seek(0)
-    plot_b64 = base64.b64encode(buf.read()).decode('utf-8')
+    plot_bytes = buf.read()
     plt.close()
 
+    # Full data URI (used by the Flask templates and the Streamlit UI).
+    plot_b64 = base64.b64encode(plot_bytes).decode('utf-8')
     plot_url = f"data:image/png;base64,{plot_b64}"
 
     # Prepare table HTML
