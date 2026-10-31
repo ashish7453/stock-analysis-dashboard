@@ -50,11 +50,57 @@ WORLD_INDICES = {
     'PSEI.PS': 'PSEI Philippines', '^BSESN': 'Sensex', '^GSPTSE': 'S&P/TSX Canada',
 }
 
+COMMODITIES = {
+    'GC=F': 'Gold', 'SI=F': 'Silver', 'PL=F': 'Platinum', 'PA=F': 'Palladium',
+    'HG=F': 'Copper', 'ALI=F': 'Aluminium', 'CL=F': 'Crude Oil (WTI)',
+    'BZ=F': 'Crude Oil (Brent)', 'NG=F': 'Natural Gas',
+}
+# Quoted as USD per 1 unit of the currency, so a positive gain means that
+# currency STRENGTHENED against the US dollar.
+CURRENCIES = {
+    'INRUSD=X': 'Rupee (India)', 'JPYUSD=X': 'Yen (Japan)', 'GBPUSD=X': 'Pound (UK)',
+    'EURUSD=X': 'Euro (Eurozone)', 'CNYUSD=X': 'Yuan (China)', 'CADUSD=X': 'Dollar (Canada)',
+    'AUDUSD=X': 'Dollar (Australia)', 'BRLUSD=X': 'Real (Brazil)',
+    'ZARUSD=X': 'Rand (South Africa)', 'MYRUSD=X': 'Ringgit (Malaysia)',
+    'SGDUSD=X': 'Dollar (Singapore)', 'NZDUSD=X': 'Dollar (New Zealand)',
+    'IDRUSD=X': 'Rupiah (Indonesia)', 'KRWUSD=X': 'Won (South Korea)',
+    'MXNUSD=X': 'Peso (Mexico)', 'THBUSD=X': 'Baht (Thailand)',
+}
+COUNTRY_ETFS = {sym: f"{country} ({sym})" for sym, country in [
+    ("EWA", "Australia"), ("EWO", "Austria"), ("EWK", "Belgium"), ("EWZ", "Brazil"),
+    ("EWC", "Canada"), ("ECH", "Chile"), ("FXI", "China"), ("GXG", "Colombia"),
+    ("EDEN", "Denmark"), ("EFNL", "Finland"), ("EWQ", "France"), ("EWG", "Germany"),
+    ("GREK", "Greece"), ("EWH", "Hong Kong"), ("INDA", "India"), ("EPI", "India"),
+    ("EIDO", "Indonesia"), ("EIRL", "Ireland"), ("EIS", "Israel"), ("EWI", "Italy"),
+    ("EWJ", "Japan"), ("EWY", "South Korea"), ("KWT", "Kuwait"), ("EWM", "Malaysia"),
+    ("EWW", "Mexico"), ("EWN", "Netherlands"), ("ENZL", "New Zealand"), ("NORW", "Norway"),
+    ("EPHE", "Philippines"), ("EPOL", "Poland"), ("QAT", "Qatar"), ("KSA", "Saudi Arabia"),
+    ("EWS", "Singapore"), ("EZA", "South Africa"), ("EWP", "Spain"), ("EWD", "Sweden"),
+    ("EWL", "Switzerland"), ("EWT", "Taiwan"), ("THD", "Thailand"), ("TUR", "Turkey"),
+    ("UAE", "UAE"), ("EWU", "United Kingdom"), ("VNM", "Vietnam"), ("ARGT", "Argentina"),
+]}
+
 
 def nifty50_symbols():
     """Yahoo symbols for the constituents in ind_nifty50list.csv."""
     df = pd.read_csv(NIFTY50_CSV)
     return [f"{s.strip()}.NS" for s in df["Symbol"].dropna()]
+
+
+def symbols_from_csv(df, suffix=".NS", limit=500):
+    """{yahoo_symbol: display_name} from an uploaded CSV. Uses a 'Symbol' /
+    'Ticker' column (any case), or the first column. Symbols that already carry
+    an exchange suffix or are indices/futures ('TCS.BO', '^NSEI', 'GC=F') are
+    kept as-is."""
+    cols = {str(c).lower().strip(): c for c in df.columns}
+    col = cols.get("symbol") or cols.get("ticker") or df.columns[0]
+    names = {}
+    for raw in df[col].dropna().astype(str).str.strip().str.upper():
+        if not raw or raw in ("SYMBOL", "TICKER"):
+            continue
+        sym = raw if ("." in raw or raw.startswith("^") or "=" in raw) else raw + suffix
+        names[sym] = raw.split(".")[0]
+    return dict(list(names.items())[:limit])
 
 
 # ------------------------------------------------------------- data helpers
@@ -122,17 +168,52 @@ def period_gain(closes):
     return (s.iloc[-1] / s.iloc[0] - 1) * 100
 
 
-def range_gains(names, start, end):
-    """DataFrame [Name, Gain (%)] sorted best -> worst, NaN rows last.
-    `names` maps Yahoo symbol -> display name. Base price is the first trading
-    day on/after `start`; `end` is inclusive."""
-    closes = download_closes(list(names), start, end)
-    rows = [{"Name": nm, "Gain (%)": period_gain(closes[sym])}
-            for sym, nm in names.items()]
-    df = pd.DataFrame(rows)
-    df["Gain (%)"] = df["Gain (%)"].astype(float).round(2)
+RANGE_COLUMNS = ["Name", "Symbol", "Gain (%)", "Base Date", "Base Price", "Last Date",
+                 "Last Price", "Range High", "Range Low", "Off High (%)",
+                 "Max Drawdown (%)", "Volatility (%)", "Up Days (%)"]
+
+
+def range_stats(names, start, end):
+    """Performance of each symbol from `start` to `end` (inclusive), sorted
+    best -> worst, missing symbols last.
+
+    Base price = last close BEFORE `start` (the convention of the original
+    desktop scripts), so the start day's own move counts. Falls back to the
+    first close on/after `start` when there is no earlier data.
+    Extra columns: range high/low, distance from the high, max drawdown,
+    annualised volatility and % of up days."""
+    start_ts = pd.Timestamp(start).normalize()
+    closes = download_closes(list(names), start_ts - timedelta(days=14), end)
+    rows = []
+    for sym, nm in names.items():
+        s = closes[sym].dropna()
+        before, after = s[s.index < start_ts], s[s.index >= start_ts]
+        w = pd.concat([before.iloc[-1:], after]) if len(before) else after
+        if after.empty or len(w) < 2:
+            rows.append({"Name": nm, "Symbol": sym})
+            continue
+        r = w.pct_change().dropna()
+        rows.append({
+            "Name": nm, "Symbol": sym,
+            "Gain (%)": (w.iloc[-1] / w.iloc[0] - 1) * 100,
+            "Base Date": w.index[0].date(), "Base Price": w.iloc[0],
+            "Last Date": w.index[-1].date(), "Last Price": w.iloc[-1],
+            "Range High": w.max(), "Range Low": w.min(),
+            "Off High (%)": (w.iloc[-1] / w.max() - 1) * 100,
+            "Max Drawdown (%)": (w / w.cummax() - 1).min() * 100,
+            "Volatility (%)": r.std() * np.sqrt(252) * 100 if len(r) > 1 else np.nan,
+            "Up Days (%)": (r > 0).mean() * 100,
+        })
+    df = pd.DataFrame(rows).reindex(columns=RANGE_COLUMNS)
+    pct = [c for c in df.columns if c.endswith("(%)")]
+    df[pct] = df[pct].astype(float).round(2)
     return df.sort_values("Gain (%)", ascending=False,
                           na_position="last").reset_index(drop=True)
+
+
+def range_gains(names, start, end):
+    """[Name, Gain (%)] only (used by the Flask routes)."""
+    return range_stats(names, start, end)[["Name", "Gain (%)"]]
 
 
 def get_valid_date(symbol, date_str, max_back=10):
@@ -163,11 +244,16 @@ def compute_index_returns(names, durations=(30, 60, 90), reference_date=None):
     ref = pd.Timestamp(reference_date or _naive_utc_now()).normalize()
     closes = download_closes(list(names), ref - timedelta(days=max(durations) + 5), ref)
 
+    hi_col = f"Off {max(durations)}D High %"
     rows = {}
     for sym in names:
         s = closes[sym].dropna()
-        rows[sym] = {f"{d}D %": period_gain(s[s.index >= ref - timedelta(days=d)])
-                     for d in durations}
+        row = {f"{d}D %": period_gain(s[s.index >= ref - timedelta(days=d)])
+               for d in durations}
+        win = s[s.index >= ref - timedelta(days=max(durations))]
+        row["Last Price"] = win.iloc[-1] if len(win) else np.nan
+        row[hi_col] = (win.iloc[-1] / win.max() - 1) * 100 if len(win) else np.nan
+        rows[sym] = row
     df = pd.DataFrame.from_dict(rows, orient="index")
     df.insert(0, "Name", [names[s] for s in df.index])
     ret_cols = [f"{d}D %" for d in durations]
@@ -181,7 +267,10 @@ def compute_index_returns(names, durations=(30, 60, 90), reference_date=None):
     ok = ok.sort_values("Sum of Ranks", kind="stable")
 
     out = pd.concat([ok, bad]) if not bad.empty else ok
-    out[ret_cols] = out[ret_cols].round(2)
+    out[ret_cols + [hi_col]] = out[ret_cols + [hi_col]].round(2)
+    order = (["Name"] + ret_cols + [c for c in out.columns if c.startswith("Rank")]
+             + ["Sum of Ranks", "Last Price", hi_col])
+    out = out[[c for c in order if c in out.columns]]
     out.index.name = "Symbol"
     return out
 
@@ -193,17 +282,18 @@ def plot_index_returns(df, which="strongest", n=3, title_prefix=""):
     if ranked.empty:
         return None
     pick = ranked.head(n) if which == "strongest" else ranked.tail(n).iloc[::-1]
-    ret_cols = [c for c in df.columns if c.endswith("D %")]
+    ret_cols = [c for c in df.columns if c.endswith("D %") and not c.startswith("Off")]
 
-    fig, ax = plt.subplots(figsize=(10, 7))
+    fig, ax = plt.subplots(figsize=(max(10, 2.4 * len(pick)), 7))
     width = 0.8 / len(ret_cols)
     x = np.arange(len(pick))
     for i, c in enumerate(ret_cols):
         vals = pick[c].to_numpy(float)
         ax.bar(x + i * width, vals, width, label=f"{c[:-3]} days")
         for xi, v in zip(x, vals):
-            ax.text(xi + i * width, v, f"{v:.2f}%", ha="center",
-                    va="bottom" if v >= 0 else "top", fontsize=11)
+            ax.text(xi + i * width, v, f"{v:.1f}%" if len(pick) > 3 else f"{v:.2f}%",
+                    ha="center", va="bottom" if v >= 0 else "top",
+                    fontsize=11 if len(pick) <= 3 else 8)
     ax.axhline(0, color="grey", linewidth=0.8)
     ax.set_xticks(x + width * (len(ret_cols) - 1) / 2)
     ax.set_xticklabels(pick["Name"], fontsize=13, rotation=30, ha="right")
@@ -275,22 +365,42 @@ def plot_seasonality(heat, ticker, n_years):
 
 
 # --------------------------------------------------------------- other charts
-def plot_gain_bars(df, title):
-    """Bar chart for a [Name, Gain (%)] frame. None if nothing to plot."""
-    valid = df.dropna(subset=["Gain (%)"])
+def plot_gain_bars(df, title, value_col="Gain (%)"):
+    """Bar chart for a [Name, Gain (%)] frame sorted best -> worst. Uses
+    horizontal bars when there are many items so names stay readable.
+    Returns None if nothing to plot."""
+    valid = df.dropna(subset=[value_col])
     if valid.empty:
         return None
-    fig, ax = plt.subplots(figsize=(12, 7))
-    gains = valid["Gain (%)"].to_numpy(float)
-    bars = ax.bar(valid["Name"], gains, color=["green" if g > 0 else "red" for g in gains])
-    for b, g in zip(bars, gains):
-        ax.text(b.get_x() + b.get_width() / 2, g, f"{g:.2f}%", ha="center",
-                va="bottom" if g > 0 else "top", fontsize=10)
-    ax.axhline(0, color="grey", linewidth=0.8)
-    ax.set_ylabel("Gain (%)")
+    names, gains = valid["Name"].tolist(), valid[value_col].to_numpy(float)
+    colors = ["#2e7d32" if g > 0 else "#c62828" for g in gains]
+    span = max(float(np.abs(gains).max()), 1e-9)
+
+    if len(valid) > 15:
+        fig, ax = plt.subplots(figsize=(12, 0.32 * len(valid) + 2))
+        y = np.arange(len(valid))
+        ax.barh(y, gains, color=colors)
+        ax.set_yticks(y)
+        ax.set_yticklabels(names, fontsize=9)
+        ax.invert_yaxis()                                  # best on top
+        for yi, g in zip(y, gains):
+            ax.text(g + (0.01 if g >= 0 else -0.01) * span, yi, f"{g:.2f}%",
+                    va="center", ha="left" if g >= 0 else "right", fontsize=8)
+        ax.axvline(0, color="grey", linewidth=0.8)
+        ax.set_xlabel(value_col)
+        ax.grid(axis="x", linestyle="--", alpha=0.5)
+        ax.set_xlim(min(0, gains.min()) - 0.15 * span, max(0, gains.max()) + 0.15 * span)
+    else:
+        fig, ax = plt.subplots(figsize=(12, 7))
+        bars = ax.bar(names, gains, color=colors)
+        for b, g in zip(bars, gains):
+            ax.text(b.get_x() + b.get_width() / 2, g, f"{g:.2f}%", ha="center",
+                    va="bottom" if g >= 0 else "top", fontsize=10)
+        ax.axhline(0, color="grey", linewidth=0.8)
+        ax.set_ylabel(value_col)
+        plt.setp(ax.get_xticklabels(), rotation=45, ha="right")
+        ax.grid(axis="y", linestyle="--", alpha=0.6)
     ax.set_title(title)
-    plt.setp(ax.get_xticklabels(), rotation=45, ha="right")
-    ax.grid(axis="y", linestyle="--", alpha=0.6)
     fig.tight_layout()
     return fig
 

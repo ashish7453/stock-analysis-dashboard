@@ -8,3 +8,4 @@ seaborn>=0.13
 streamlit>=1.50
 pretty-html-table>=0.9.16
 lxml>=5.0
+openpyxl>=3.1
