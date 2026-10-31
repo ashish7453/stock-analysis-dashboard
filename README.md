@@ -5,7 +5,7 @@ Six market-analysis views built on Yahoo Finance data, served with Streamlit.
 | Page | What it does |
 |---|---|
 | Nifty 50 Heatmap | 10x5 heatmap of Nifty 50 constituents' gains over any date range, sorted best→worst |
-| NSE Indices | 30/60/90-day performance of 22 NSE sectoral indices, ranked, weakest three charted |
+| NSE Indices | 30/60/90-day performance of 22 NSE sectoral indices, ranked; strongest or weakest three charted |
 | World Indices | Same 30/60/90-day ranking across 20 global indices |
 | Seasonality | Monthly return heatmap (year x month) for any ticker with up to 50 years of history |
 | Custom Date Range | Bar chart comparing 20 global indices over a user-chosen window |
@@ -35,15 +35,18 @@ requirements.txt
 stock-chart-app-main/
     app.py                  # original Flask app + all analysis functions
     ind_nifty50list.csv     # Nifty 50 constituent list
-    templates/              # original Flask templates (kept for reference)
 ```
 
+Note: the Flask templates (`templates/*.html`) are not in this repo, so the Flask
+UI needs them restored before `python app.py` works. The Streamlit app does not use them.
+
 `streamlit_app.py` imports the analysis functions from `stock-chart-app-main/app.py`
-so the strategy logic lives in exactly one place. The Flask app can still be run
-standalone (`python app.py` → port 5000) if you want the original UI.
+so the strategy logic lives in exactly one place. 
 
 ## Notes
 
 - `BSE-SMLCAP.BO` was delisted on Yahoo; the BSE SmallCap row shows N/A.
 - Charts are rendered server-side with matplotlib.
+- Downloads are batched (one Yahoo request per page) and cached for 15 minutes.
+- Seasonality skips the current, unfinished month unless you tick "Include current month".
 - Data: Yahoo Finance, delayed. Not investment advice.
