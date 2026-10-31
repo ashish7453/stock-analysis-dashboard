@@ -4,12 +4,21 @@ Six market-analysis views built on Yahoo Finance data, served with Streamlit.
 
 | Page | What it does |
 |---|---|
-| Nifty 50 Heatmap | 10x5 heatmap of Nifty 50 constituents' gains over any date range, sorted best→worst |
-| NSE Indices | 30/60/90-day performance of 22 NSE sectoral indices, ranked; strongest or weakest three charted |
-| World Indices | Same 30/60/90-day ranking across 20 global indices |
-| Seasonality | Monthly return heatmap (year x month) for any ticker with up to 50 years of history |
-| Custom Date Range | Bar chart comparing 20 global indices over a user-chosen window |
-| Candlestick Chart | OHLC candlestick chart for any Yahoo ticker |
+| Nifty 50 Performance | All 50 stocks over any date range — heatmap or ranked bars |
+| NSE Sector Indices | 22 NSE indices ranked on 30/60/90-day returns; strongest or weakest N charted |
+| Stock List Ranking | Upload any CSV with a `Symbol` column (NSE/BSE/US) and rank it on 30/60/90-day returns |
+| World Indices | 20 global indices ranked on 30/60/90-day returns |
+| Global Indices (Date Range) | 20 global indices over a date range you choose |
+| Country ETFs (USA) | 44 US-listed single-country ETFs ranked on 30/60/90-day returns |
+| Commodities | Gold, silver, platinum, palladium, copper, aluminium, WTI, Brent, natural gas over a date range |
+| Currencies vs USD | 16 currencies' moves against the US dollar over a date range |
+| Seasonality | Monthly return heatmap (year x month) plus win rate and averages per month |
+| Candlestick Chart | OHLC candlestick chart with volume for any Yahoo ticker |
+
+Every date-range tool shows advancers/decliners, median, best/worst, and per-symbol
+base/last price, range high/low, distance from high, max drawdown, annualised
+volatility and % up days. Date-range tools have a **Live auto-refresh** toggle
+(every 60 s when the end date is today). All result tables download as CSV or Excel.
 
 ## Deploy
 
