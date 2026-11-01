@@ -140,7 +140,9 @@ def _range_body(key, title, names, p, views, price_fmt, unit_note):
 
     st.dataframe(df, width="stretch", hide_index=True,
                  column_config=column_config(df, price_fmt))
-    st.caption("Base price = last close before the start date. Volatility is "
+    st.caption("Gain = close on the end date vs close on the start date (or the "
+               "last trading day before it). Check Base Date / Last Date in the "
+               "table. Volatility is "
                "annualised from daily returns. Max drawdown = worst fall from a "
                "peak inside the range.")
     download_buttons(df, f"{key}_{p['start']}_{p['end']}", key)
@@ -199,7 +201,9 @@ def _ranking_body(key, title, names, chart_title):
     else:
         show_fig(fig)
     st.dataframe(df, width="stretch", column_config=column_config(df))
-    st.caption("Rank 1 = best return in that window. 'Off 90D High' = how far the "
+    st.caption("30D % = latest close vs the close 30 days ago (or the last trading "
+               "day before that, if it was a holiday); same for 60D and 90D. "
+               "Rank 1 = best return in that window. 'Off 90D High' = how far the "
                "last close is below the highest close of the last 90 days.")
     download_buttons(df, f"{key}_{date.today()}", key, index=True)
     missing_note(df, "Sum of Ranks")
