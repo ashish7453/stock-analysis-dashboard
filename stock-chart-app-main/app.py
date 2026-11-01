@@ -160,6 +160,17 @@ def download_closes(symbols, start, end):
     return strip_tz(closes.reindex(columns=symbols).astype(float))
 
 
+def base_window(closes, start):
+    """Closes from the base close to the end. Base = close ON `start`, or the
+    last trading day before it if the market was shut. Falls back to the first
+    close after `start` for symbols with no earlier data (new listings).
+    This is the single rule every tool uses for 'gain since a date'."""
+    s = closes.dropna()
+    start = pd.Timestamp(start).normalize()
+    base, after = s[s.index <= start], s[s.index > start]
+    return pd.concat([base.iloc[-1:], after]) if len(base) else after
+
+
 def period_gain(closes):
     """% change from first to last available close in a series."""
     s = closes.dropna()
@@ -177,19 +188,18 @@ def range_stats(names, start, end):
     """Performance of each symbol from `start` to `end` (inclusive), sorted
     best -> worst, missing symbols last.
 
-    Base price = last close BEFORE `start` (the convention of the original
-    desktop scripts), so the start day's own move counts. Falls back to the
-    first close on/after `start` when there is no earlier data.
+    Base price = close ON the start date (or the last trading day before it,
+    if the market was shut), so start 29-Oct / end 30-Oct gives exactly the
+    one-day move from the 29th's close to the 30th's close. Falls back to the
+    first close after `start` for symbols listed later.
     Extra columns: range high/low, distance from the high, max drawdown,
     annualised volatility and % of up days."""
     start_ts = pd.Timestamp(start).normalize()
     closes = download_closes(list(names), start_ts - timedelta(days=14), end)
     rows = []
     for sym, nm in names.items():
-        s = closes[sym].dropna()
-        before, after = s[s.index < start_ts], s[s.index >= start_ts]
-        w = pd.concat([before.iloc[-1:], after]) if len(before) else after
-        if after.empty or len(w) < 2:
+        w = base_window(closes[sym], start_ts)
+        if len(w) < 2 or w.index[-1] <= start_ts:
             rows.append({"Name": nm, "Symbol": sym})
             continue
         r = w.pct_change().dropna()
@@ -229,10 +239,11 @@ def get_valid_date(symbol, date_str, max_back=10):
 
 
 def get_custom_date_range_gain(symbol, start_date, end_date):
-    """Kept for backward compatibility. end_date is EXCLUSIVE (yfinance style)."""
+    """Kept for backward compatibility. end_date is EXCLUSIVE (yfinance style).
+    Same base rule as everything else (close on/before start_date)."""
     end_incl = pd.Timestamp(end_date) - timedelta(days=1)
-    data = download_ohlc(symbol, start_date, end_incl)
-    return np.nan if data.empty else period_gain(data["Close"])
+    data = download_ohlc(symbol, pd.Timestamp(start_date) - timedelta(days=14), end_incl)
+    return np.nan if data.empty else period_gain(base_window(data["Close"], start_date))
 
 
 # ------------------------------------------------------- 30/60/90-day ranking
@@ -242,15 +253,16 @@ def compute_index_returns(names, durations=(30, 60, 90), reference_date=None):
     missing data are appended at the bottom."""
     durations = list(durations)
     ref = pd.Timestamp(reference_date or _naive_utc_now()).normalize()
-    closes = download_closes(list(names), ref - timedelta(days=max(durations) + 5), ref)
+    # 14 extra days so the base close exists even after long holidays
+    closes = download_closes(list(names), ref - timedelta(days=max(durations) + 14), ref)
 
     hi_col = f"Off {max(durations)}D High %"
     rows = {}
     for sym in names:
         s = closes[sym].dropna()
-        row = {f"{d}D %": period_gain(s[s.index >= ref - timedelta(days=d)])
+        row = {f"{d}D %": period_gain(base_window(s, ref - timedelta(days=d)))
                for d in durations}
-        win = s[s.index >= ref - timedelta(days=max(durations))]
+        win = base_window(s, ref - timedelta(days=max(durations)))
         row["Last Price"] = win.iloc[-1] if len(win) else np.nan
         row[hi_col] = (win.iloc[-1] / win.max() - 1) * 100 if len(win) else np.nan
         rows[sym] = row
