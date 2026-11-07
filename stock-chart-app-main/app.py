@@ -24,6 +24,7 @@ from matplotlib.colors import LinearSegmentedColormap
 
 HERE = os.path.dirname(os.path.abspath(__file__))
 NIFTY50_CSV = os.path.join(HERE, "ind_nifty50list.csv")
+CALC_VERSION = 3   # bump when calculations change: invalidates Streamlit's cache
 MONTHS = ["Jan", "Feb", "Mar", "Apr", "May", "Jun",
           "Jul", "Aug", "Sep", "Oct", "Nov", "Dec"]
 
@@ -147,8 +148,12 @@ def download_closes(symbols, start, end):
     Symbols with no data come back as all-NaN columns."""
     symbols = list(symbols)
     end_excl = _to_date(pd.Timestamp(end) + timedelta(days=1))
+    # auto_adjust=False -> real exchange closing prices (split-adjusted only),
+    # so Base/Last Price match NSE's published closes. Dividend-adjusted
+    # prices (auto_adjust=True) lowered the base price of any stock that went
+    # ex-dividend inside the range, so its gain did not match NSE.
     data = yf.download(symbols, start=_to_date(start), end=end_excl,
-                       auto_adjust=True, progress=False, group_by="column")
+                       auto_adjust=False, progress=False, group_by="column")
     if data.empty:
         return pd.DataFrame(columns=symbols, dtype=float)
     if isinstance(data.columns, pd.MultiIndex):
