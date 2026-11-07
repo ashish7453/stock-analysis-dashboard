@@ -131,18 +131,30 @@ def missing_note(df, col):
 def _range_body(key, title, names, p, views, price_fmt, unit_note):
     fetch = live_range_stats if p["live"] else cached_range_stats
     with st.spinner(f"Fetching {len(names)} symbols..."):
-        df = fetch(names, p["start"], p["end"], version=core.CALC_VERSION)
+        try:
+            df = fetch(names, p["start"], p["end"], version=core.CALC_VERSION)
+        except core.DataUnavailable as e:      # not cached: next click retries
+            st.error(str(e))
+            return
     if p["live"]:
         st.caption(f"🔴 Live · refreshes every {LIVE_EVERY}s · last update "
                    f"{datetime.now(IST):%H:%M:%S} IST")
     if unit_note:
         st.info(unit_note, icon="ℹ️")
     v = df.dropna(subset=["Gain (%)"])
-    if not v.empty:
+    req_start, req_end = pd.Timestamp(p["start"]).date(), pd.Timestamp(p["end"]).date()
+    if v.empty:
+        st.warning(f"Yahoo Finance has no closing prices between {req_start:%a %d-%b-%Y} "
+                   f"and {req_end:%a %d-%b-%Y} yet (market holiday/weekend, or the day's "
+                   "data is not published yet). Try again later or pick an earlier date.")
+    else:
         b, l = v["Base Date"].mode().iloc[0], v["Last Date"].mode().iloc[0]
         st.markdown(f"**Gain measured from close of {b:%a %d-%b-%Y} → close of "
                     f"{l:%a %d-%b-%Y}** (base = last trading day before your start date "
-                    f"{pd.Timestamp(p['start']):%d-%b-%Y})")
+                    f"{req_start:%d-%b-%Y})")
+        if l < req_end and req_end.weekday() < 5:
+            st.caption(f"⚠️ Latest close available from Yahoo is {l:%a %d-%b}; "
+                       f"no data yet for {req_end:%a %d-%b}.")
     summary_metrics(df)
 
     view = (st.radio("Chart", list(views), horizontal=True, key=f"{key}_view")
