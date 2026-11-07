@@ -20,7 +20,17 @@ APP_DIR = os.path.join(HERE, "stock-chart-app-main")
 if APP_DIR not in sys.path:
     sys.path.insert(0, APP_DIR)
 
+import importlib                 # noqa: E402
 import app as core               # noqa: E402  (needs the sys.path tweak above)
+
+# Streamlit Cloud re-runs this file when the repo updates, but can keep the OLD
+# `app` module in memory, mixing new UI code with old calculations. Reload it
+# whenever app.py changes on disk, and drop results cached by the old code.
+_mtime = os.path.getmtime(core.__file__)
+if getattr(core, "_loaded_mtime", None) != _mtime:   # also catches modules loaded by older code
+    core = importlib.reload(core)
+    st.cache_data.clear()
+core._loaded_mtime = _mtime
 import matplotlib.pyplot as plt  # noqa: E402
 
 st.set_page_config(page_title="Analysis Dashboard", page_icon="📈", layout="wide")
@@ -35,17 +45,17 @@ PCT = st.column_config.NumberColumn(format="%.2f%%")
 
 # --------------------------------------------------------------- cached data
 @st.cache_data(ttl=CACHE_TTL, show_spinner=False)
-def cached_range_stats(names: dict, start: str, end: str):
+def cached_range_stats(names: dict, start: str, end: str, version: int = core.CALC_VERSION):
     return core.range_stats(names, start, end)
 
 
 @st.cache_data(ttl=LIVE_TTL, show_spinner=False)
-def live_range_stats(names: dict, start: str, end: str):
+def live_range_stats(names: dict, start: str, end: str, version: int = core.CALC_VERSION):
     return core.range_stats(names, start, end)
 
 
 @st.cache_data(ttl=CACHE_TTL, show_spinner=False)
-def cached_index_returns(names: dict, today: str):
+def cached_index_returns(names: dict, today: str, version: int = core.CALC_VERSION):
     return core.compute_index_returns(names, reference_date=today)
 
 
@@ -121,12 +131,18 @@ def missing_note(df, col):
 def _range_body(key, title, names, p, views, price_fmt, unit_note):
     fetch = live_range_stats if p["live"] else cached_range_stats
     with st.spinner(f"Fetching {len(names)} symbols..."):
-        df = fetch(names, p["start"], p["end"])
+        df = fetch(names, p["start"], p["end"], version=core.CALC_VERSION)
     if p["live"]:
         st.caption(f"🔴 Live · refreshes every {LIVE_EVERY}s · last update "
                    f"{datetime.now(IST):%H:%M:%S} IST")
     if unit_note:
         st.info(unit_note, icon="ℹ️")
+    v = df.dropna(subset=["Gain (%)"])
+    if not v.empty:
+        b, l = v["Base Date"].mode().iloc[0], v["Last Date"].mode().iloc[0]
+        st.markdown(f"**Gain measured from close of {b:%a %d-%b-%Y} → close of "
+                    f"{l:%a %d-%b-%Y}** (base = last trading day before your start date "
+                    f"{pd.Timestamp(p['start']):%d-%b-%Y})")
     summary_metrics(df)
 
     view = (st.radio("Chart", list(views), horizontal=True, key=f"{key}_view")
@@ -179,7 +195,7 @@ def range_tool(key, title, names, default_start, views, button,
 def _ranking_body(key, title, names, chart_title):
     with st.spinner(f"Pulling 30/60/90-day returns for {len(names)} symbols..."):
         try:
-            df = cached_index_returns(names, str(date.today()))
+            df = cached_index_returns(names, str(date.today()), version=core.CALC_VERSION)
         except Exception as e:
             st.error(f"Error: {e}")
             return
