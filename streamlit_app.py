@@ -66,8 +66,8 @@ def show_fig(fig):
 
 
 def valid_range(start, end):
-    if start >= end:
-        st.error("Start date must be before the end date.")
+    if start > end:
+        st.error("Start date must be on or before the end date.")
         return False
     if end > date.today():
         st.warning("End date is in the future; data runs up to the latest close.")
@@ -140,9 +140,9 @@ def _range_body(key, title, names, p, views, price_fmt, unit_note):
 
     st.dataframe(df, width="stretch", hide_index=True,
                  column_config=column_config(df, price_fmt))
-    st.caption("Gain = close on the end date vs close on the start date (or the "
-               "last trading day before it). Check Base Date / Last Date in the "
-               "table. Volatility is "
+    st.caption("Gain = close on the end date vs the close of the trading day "
+               "BEFORE the start date, so the start day's move is included. Check "
+               "Base Date / Last Date in the table. Volatility is "
                "annualised from daily returns. Max drawdown = worst fall from a "
                "peak inside the range.")
     download_buttons(df, f"{key}_{p['start']}_{p['end']}", key)
