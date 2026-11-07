@@ -9,6 +9,7 @@ import base64
 import io
 import math
 import os
+import time
 from datetime import datetime, timedelta, timezone
 
 import matplotlib
@@ -24,7 +25,7 @@ from matplotlib.colors import LinearSegmentedColormap
 
 HERE = os.path.dirname(os.path.abspath(__file__))
 NIFTY50_CSV = os.path.join(HERE, "ind_nifty50list.csv")
-CALC_VERSION = 3   # bump when calculations change: invalidates Streamlit's cache
+CALC_VERSION = 5   # bump when calculations change: invalidates Streamlit's cache
 MONTHS = ["Jan", "Feb", "Mar", "Apr", "May", "Jun",
           "Jul", "Aug", "Sep", "Oct", "Nov", "Dec"]
 
@@ -131,30 +132,53 @@ def _to_date(d):
     return pd.Timestamp(d).strftime("%Y-%m-%d")
 
 
+def _request_end(end):
+    """yfinance `end` to send Yahoo. Asking for exactly the day after `end`
+    sometimes makes Yahoo leave out the last daily bar (seen live: an end
+    date of Fri 6-Nov returned data only up to Thu 5-Nov). So ask for 4 extra
+    days and trim to `end` ourselves with _trim_to()."""
+    return _to_date(pd.Timestamp(end) + timedelta(days=4))
+
+
+def _trim_to(df, end):
+    """Keep rows dated on or before `end` (inclusive)."""
+    if df.empty or not isinstance(df.index, pd.DatetimeIndex):
+        return df
+    return df[df.index < pd.Timestamp(end).normalize() + timedelta(days=1)]
+
+
 def download_ohlc(symbol, start, end, interval="1d"):
     """OHLCV for one symbol. `end` is INCLUSIVE here (yfinance's is exclusive)."""
-    end_excl = _to_date(pd.Timestamp(end) + timedelta(days=1))
-    data = yf.download(symbol, start=_to_date(start), end=end_excl,
+    data = yf.download(symbol, start=_to_date(start), end=_request_end(end),
                        interval=interval, auto_adjust=True, progress=False)
-    data = strip_tz(flatten_columns(data))
+    data = _trim_to(strip_tz(flatten_columns(data)), end)
     if data.empty or "Close" not in data.columns:
         return pd.DataFrame()
     return data.dropna(subset=["Close"])
 
 
-def download_closes(symbols, start, end):
-    """Closing prices for many symbols in ONE batched request
-    (rows = dates, columns = symbols). `end` is inclusive.
-    Symbols with no data come back as all-NaN columns."""
-    symbols = list(symbols)
-    end_excl = _to_date(pd.Timestamp(end) + timedelta(days=1))
+class DataUnavailable(RuntimeError):
+    """Yahoo returned no prices at all (rate limit, outage or blocked IP).
+    Raised instead of returning an empty table so callers (and Streamlit's
+    cache) never treat a failed download as a real, cacheable result."""
+
+
+def _yahoo_errors():
+    try:
+        import yfinance.shared as shared
+        return dict(getattr(shared, "_ERRORS", {}) or {})
+    except Exception:
+        return {}
+
+
+def _download_close_table(symbols, start, end_req, threads=True):
     # auto_adjust=False -> real exchange closing prices (split-adjusted only),
     # so Base/Last Price match NSE's published closes. Dividend-adjusted
     # prices (auto_adjust=True) lowered the base price of any stock that went
     # ex-dividend inside the range, so its gain did not match NSE.
-    data = yf.download(symbols, start=_to_date(start), end=end_excl,
-                       auto_adjust=False, progress=False, group_by="column")
-    if data.empty:
+    data = yf.download(symbols, start=start, end=end_req, auto_adjust=False,
+                       progress=False, group_by="column", threads=threads)
+    if data is None or data.empty:
         return pd.DataFrame(columns=symbols, dtype=float)
     if isinstance(data.columns, pd.MultiIndex):
         closes = data["Close"]
@@ -163,6 +187,37 @@ def download_closes(symbols, start, end):
     if isinstance(closes, pd.Series):
         closes = closes.to_frame(symbols[0])
     return strip_tz(closes.reindex(columns=symbols).astype(float))
+
+
+def download_closes(symbols, start, end, retry_wait=2.0):
+    """Closing prices for many symbols in ONE batched request
+    (rows = dates, columns = symbols). `end` is inclusive.
+
+    Symbols Yahoo skipped (rate limit / hiccup) are retried once, one at a
+    time. Symbols that still have no data come back as all-NaN columns.
+    If NO symbol has data, raises DataUnavailable with Yahoo's message."""
+    symbols = list(symbols)
+    start_s = _to_date(start)
+    end_req = _request_end(end)
+    closes = _trim_to(_download_close_table(symbols, start_s, end_req), end)
+
+    missing = [s for s in symbols if closes[s].dropna().empty]
+    if missing:
+        time.sleep(retry_wait)
+        again = _trim_to(_download_close_table(missing, start_s, end_req, threads=False), end)
+        got = [s for s in missing if not again[s].dropna().empty]
+        if got:
+            closes = closes.combine_first(again[got]).reindex(columns=symbols)
+
+    if all(closes[s].dropna().empty for s in symbols):
+        errs = _yahoo_errors()
+        detail = next(iter(errs.values()), "") if errs else ""
+        raise DataUnavailable(
+            "Yahoo Finance returned no prices for any symbol "
+            f"({start_s} to {_to_date(end)}). This is usually a temporary "
+            "rate limit on the hosting server; wait a minute and run again."
+            + (f" Yahoo said: {str(detail)[:200]}" if detail else ""))
+    return closes
 
 
 def base_window(closes, start, include_start=True):
