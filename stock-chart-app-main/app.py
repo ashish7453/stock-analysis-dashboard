@@ -160,14 +160,23 @@ def download_closes(symbols, start, end):
     return strip_tz(closes.reindex(columns=symbols).astype(float))
 
 
-def base_window(closes, start):
-    """Closes from the base close to the end. Base = close ON `start`, or the
-    last trading day before it if the market was shut. Falls back to the first
-    close after `start` for symbols with no earlier data (new listings).
-    This is the single rule every tool uses for 'gain since a date'."""
+def base_window(closes, start, include_start=True):
+    """Closes from the base close to the end.
+
+    include_start=True  -> base = close ON `start` (or the last trading day
+                           before it). Used by the 30/60/90-day rankings.
+    include_start=False -> base = close of the last trading day BEFORE
+                           `start`, so the start day's own move is counted.
+                           Used wherever the user picks a start date.
+
+    Falls back to the first available close for symbols with no earlier data
+    (new listings)."""
     s = closes.dropna()
     start = pd.Timestamp(start).normalize()
-    base, after = s[s.index <= start], s[s.index > start]
+    if include_start:
+        base, after = s[s.index <= start], s[s.index > start]
+    else:
+        base, after = s[s.index < start], s[s.index >= start]
     return pd.concat([base.iloc[-1:], after]) if len(base) else after
 
 
@@ -188,18 +197,19 @@ def range_stats(names, start, end):
     """Performance of each symbol from `start` to `end` (inclusive), sorted
     best -> worst, missing symbols last.
 
-    Base price = close ON the start date (or the last trading day before it,
-    if the market was shut), so start 29-Oct / end 30-Oct gives exactly the
-    one-day move from the 29th's close to the 30th's close. Falls back to the
-    first close after `start` for symbols listed later.
+    Base price = close of the last trading day BEFORE the start date, so the
+    start day's own move is included. E.g. start 30-Oct / end 30-Oct gives the
+    30th's one-day move (close 29 -> close 30); start Mon 2-Nov uses Friday
+    30-Oct's close. Falls back to the first close on/after `start` for
+    symbols listed later.
     Extra columns: range high/low, distance from the high, max drawdown,
     annualised volatility and % of up days."""
     start_ts = pd.Timestamp(start).normalize()
     closes = download_closes(list(names), start_ts - timedelta(days=14), end)
     rows = []
     for sym, nm in names.items():
-        w = base_window(closes[sym], start_ts)
-        if len(w) < 2 or w.index[-1] <= start_ts:
+        w = base_window(closes[sym], start_ts, include_start=False)
+        if len(w) < 2 or w.index[-1] < start_ts:
             rows.append({"Name": nm, "Symbol": sym})
             continue
         r = w.pct_change().dropna()
@@ -240,10 +250,10 @@ def get_valid_date(symbol, date_str, max_back=10):
 
 def get_custom_date_range_gain(symbol, start_date, end_date):
     """Kept for backward compatibility. end_date is EXCLUSIVE (yfinance style).
-    Same base rule as everything else (close on/before start_date)."""
+    Same base rule as range_stats (last close before start_date)."""
     end_incl = pd.Timestamp(end_date) - timedelta(days=1)
     data = download_ohlc(symbol, pd.Timestamp(start_date) - timedelta(days=14), end_incl)
-    return np.nan if data.empty else period_gain(base_window(data["Close"], start_date))
+    return np.nan if data.empty else period_gain(base_window(data["Close"], start_date, include_start=False))
 
 
 # ------------------------------------------------------- 30/60/90-day ranking
