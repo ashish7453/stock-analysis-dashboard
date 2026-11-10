@@ -43,6 +43,12 @@ IST = ZoneInfo("Asia/Kolkata")
 PCT = st.column_config.NumberColumn(format="%.2f%%")
 
 
+def today_ist():
+    """Today's date in India. The hosting server runs on UTC, so date.today()
+    would still say 'yesterday' between 00:00 and 05:30 IST."""
+    return datetime.now(IST).date()
+
+
 # --------------------------------------------------------------- cached data
 @st.cache_data(ttl=CACHE_TTL, show_spinner=False)
 def cached_range_stats(names: dict, start: str, end: str, version: int = core.CALC_VERSION):
@@ -79,7 +85,7 @@ def valid_range(start, end):
     if start > end:
         st.error("Start date must be on or before the end date.")
         return False
-    if end > date.today():
+    if end > today_ist():
         st.warning("End date is in the future; data runs up to the latest close.")
     return True
 
@@ -181,21 +187,21 @@ _range_static = st.fragment(_range_body)
 _range_live = st.fragment(run_every=LIVE_EVERY)(_range_body)
 
 
-def range_tool(key, title, names, default_start, views, button,
+def range_tool(key, title, names, views, button,
                price_fmt="%.2f", unit_note=None, extra=None):
     """Generic 'performance between two dates' page."""
     st.header(title)
     if extra:
         st.caption(extra)
     c1, c2, c3 = st.columns([1, 1, 1])
-    start = c1.date_input("Start", default_start, key=f"{key}_start")
-    end = c2.date_input("End", date.today(), key=f"{key}_end")
+    start = c1.date_input("Start", today_ist(), key=f"{key}_start")
+    end = c2.date_input("End", today_ist(), key=f"{key}_end")
     c3.write("")
     live = c3.toggle("Live auto-refresh", False, key=f"{key}_live",
                      help=f"Re-fetches every {LIVE_EVERY}s. Only used when the end date is today.")
     if st.button(button, type="primary", key=f"{key}_go") and valid_range(start, end):
         st.session_state[key] = {"start": str(start), "end": str(end),
-                                 "live": bool(live and end >= date.today())}
+                                 "live": bool(live and end >= today_ist())}
     p = st.session_state.get(key)
     if p:
         (_range_live if p["live"] else _range_static)(
@@ -207,7 +213,7 @@ def range_tool(key, title, names, default_start, views, button,
 def _ranking_body(key, title, names, chart_title):
     with st.spinner(f"Pulling 30/60/90-day returns for {len(names)} symbols..."):
         try:
-            df = cached_index_returns(names, str(date.today()), version=core.CALC_VERSION)
+            df = cached_index_returns(names, str(today_ist()), version=core.CALC_VERSION)
         except Exception as e:
             st.error(f"Error: {e}")
             return
@@ -233,7 +239,7 @@ def _ranking_body(key, title, names, chart_title):
                "day before that, if it was a holiday); same for 60D and 90D. "
                "Rank 1 = best return in that window. 'Off 90D High' = how far the "
                "last close is below the highest close of the last 90 days.")
-    download_buttons(df, f"{key}_{date.today()}", key, index=True)
+    download_buttons(df, f"{key}_{today_ist()}", key, index=True)
     missing_note(df, "Sum of Ranks")
 
 
@@ -267,7 +273,6 @@ def page_home():
 def page_nifty50():
     names = {s: s[:-3] for s in core.nifty50_symbols()}
     range_tool("nifty50", "Nifty 50 Performance", names,
-               date.today() - timedelta(days=30),
                {"Heatmap": core.plot_gain_grid, "Ranked bars": core.plot_gain_bars},
                "Run Nifty 50 scan")
 
@@ -282,7 +287,7 @@ def page_world():
 
 def page_custom():
     range_tool("custom", "Global Indices (Date Range)", core.WORLD_INDICES,
-               date(date.today().year, 1, 1), {"Bars": core.plot_gain_bars},
+               {"Bars": core.plot_gain_bars},
                "Compare indices",
                unit_note="Returns are in each index's local currency.")
 
@@ -295,7 +300,7 @@ def page_etfs():
 
 def page_commodities():
     range_tool("commod", "Commodities", core.COMMODITIES,
-               date.today() - timedelta(days=30), {"Bars": core.plot_gain_bars},
+               {"Bars": core.plot_gain_bars},
                "Compare commodities",
                extra="Front-month futures on US/LME-linked exchanges, priced in USD.",
                unit_note="Futures roll each month, so a long range can include "
@@ -304,7 +309,7 @@ def page_commodities():
 
 def page_currencies():
     range_tool("fx", "Currencies vs USD", core.CURRENCIES,
-               date.today() - timedelta(days=30), {"Bars": core.plot_gain_bars},
+               {"Bars": core.plot_gain_bars},
                "Compare currencies", price_fmt="%.6f",
                unit_note="Positive = the currency strengthened against the US dollar; "
                          "negative = it weakened. Price column = USD per 1 unit.")
@@ -369,8 +374,8 @@ def page_candle():
     st.header("Candlestick Chart")
     c1, c2, c3 = st.columns([2, 1, 1])
     ticker = c1.text_input("Ticker", "TCS.NS", help="Yahoo symbol, e.g. RELIANCE.NS").strip().upper()
-    start = c2.date_input("Start", date.today() - timedelta(days=180))
-    end = c3.date_input("End", date.today())
+    start = c2.date_input("Start", today_ist())
+    end = c3.date_input("End", today_ist())
     if st.button("Generate chart", type="primary") and ticker and valid_range(start, end):
         with st.spinner("Fetching data..."):
             data = cached_ohlc(ticker, str(start), str(end))
