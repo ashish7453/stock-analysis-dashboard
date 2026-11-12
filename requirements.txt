@@ -11,3 +11,4 @@ pretty-html-table>=0.9.16
 lxml>=5.0
 openpyxl>=3.1
 six
+plotly>=5.24
