@@ -83,6 +83,55 @@ COUNTRY_ETFS = {sym: f"{country} ({sym})" for sym, country in [
     ("UAE", "UAE"), ("EWU", "United Kingdom"), ("VNM", "Vietnam"), ("ARGT", "Argentina"),
 ]}
 
+# USA sectoral & thematic indices (Yahoo symbols) -> (display name, category).
+# Sectoral = the 11 S&P 500 sector indices. Thematic = real US thematic indices
+# where Yahoo carries them, otherwise the best-known thematic ETF, marked (ETF).
+US_INDICES = {
+    # S&P 500 sectors
+    "^SP500-45": ("Information Technology", "Sectoral"),
+    "^SP500-40": ("Financials", "Sectoral"),
+    "^SP500-35": ("Health Care", "Sectoral"),
+    "^SP500-25": ("Consumer Discretionary", "Sectoral"),
+    "^SP500-30": ("Consumer Staples", "Sectoral"),
+    "^SP500-10": ("Energy", "Sectoral"),
+    "^SP500-20": ("Industrials", "Sectoral"),
+    "^SP500-15": ("Materials", "Sectoral"),
+    "^SP500-55": ("Utilities", "Sectoral"),
+    "^SP500-60": ("Real Estate", "Sectoral"),
+    "^SP500-50": ("Communication Services", "Sectoral"),
+    # thematic indices
+    "^SOX": ("Semiconductors (PHLX)", "Thematic"),
+    "^NBI": ("Biotechnology (Nasdaq)", "Thematic"),
+    "^BKX": ("Banks (KBW)", "Thematic"),
+    "^DJT": ("Transportation (Dow Jones)", "Thematic"),
+    "^HGX": ("Housing (PHLX)", "Thematic"),
+    "^XAU": ("Gold & Silver Miners (PHLX)", "Thematic"),
+    "^OSX": ("Oil Services (PHLX)", "Thematic"),
+    "^XOI": ("Oil (NYSE Arca)", "Thematic"),
+    # themes with no index on Yahoo -> leading ETF
+    "BOTZ": ("Robotics & AI (ETF)", "Thematic"),
+    "CIBR": ("Cybersecurity (ETF)", "Thematic"),
+    "SKYY": ("Cloud Computing (ETF)", "Thematic"),
+    "ICLN": ("Clean Energy (ETF)", "Thematic"),
+    "TAN": ("Solar (ETF)", "Thematic"),
+    "LIT": ("Lithium & Battery (ETF)", "Thematic"),
+    "URA": ("Uranium (ETF)", "Thematic"),
+    "ITA": ("Aerospace & Defense (ETF)", "Thematic"),
+    "JETS": ("Airlines (ETF)", "Thematic"),
+    "KRE": ("Regional Banks (ETF)", "Thematic"),
+    "PAVE": ("Infrastructure (ETF)", "Thematic"),
+    "FINX": ("Fintech (ETF)", "Thematic"),
+    "BLOK": ("Blockchain (ETF)", "Thematic"),
+    "ARKK": ("Disruptive Innovation (ARKK)", "Thematic"),
+    # broad market, for comparison
+    "^GSPC": ("S&P 500", "Broad market"),
+    "^NDX": ("Nasdaq-100", "Broad market"),
+    "^DJI": ("Dow Jones Industrial", "Broad market"),
+    "^RUT": ("Russell 2000", "Broad market"),
+    "^SP400": ("S&P MidCap 400", "Broad market"),
+}
+US_CATEGORIES = ["Sectoral", "Thematic", "Broad market"]
+
 
 def nifty50_symbols():
     """Yahoo symbols for the constituents in ind_nifty50list.csv."""
