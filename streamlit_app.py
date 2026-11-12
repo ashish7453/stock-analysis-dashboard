@@ -35,6 +35,13 @@ core._loaded_mtime = _mtime
 import matplotlib.pyplot as plt  # noqa: E402
 
 st.set_page_config(page_title="Analysis Dashboard", page_icon="📈", layout="wide")
+# Use the full width: Streamlit's wide layout still keeps ~80px empty on each
+# side, which is wasted space when the app is embedded (e.g. in Google Sites).
+st.html("""<style>
+[data-testid="stMainBlockContainer"], .block-container {
+  padding-left: 1rem !important; padding-right: 1rem !important;
+  padding-top: 1rem !important; max-width: 100% !important; }
+</style>""")
 
 DATA_SOURCE = ("Data: Yahoo Finance (delayed) and NSE/BSE end-of-day files. "
                "Not investment advice.")
