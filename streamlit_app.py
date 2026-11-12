@@ -32,6 +32,12 @@ if getattr(core, "_loaded_mtime", None) != _mtime:   # also catches modules load
     core = importlib.reload(core)
     st.cache_data.clear()
 core._loaded_mtime = _mtime
+
+import charts                    # noqa: E402  Plotly charts (stock-chart-app-main/charts.py)
+_cmtime = os.path.getmtime(charts.__file__)
+if getattr(charts, "_loaded_mtime", None) != _cmtime:
+    charts = importlib.reload(charts)
+charts._loaded_mtime = _cmtime
 import matplotlib.pyplot as plt  # noqa: E402
 
 st.set_page_config(page_title="Analysis Dashboard", page_icon="📈", layout="wide")
@@ -89,6 +95,19 @@ def cached_ohlc(ticker: str, start: str, end: str):
 
 
 # ------------------------------------------------------------------- helpers
+PLOTLY_CONFIG = {"displaylogo": False, "scrollZoom": False,
+                 "modeBarButtonsToRemove": ["lasso2d", "select2d", "autoScale2d"]}
+
+
+def show_chart(fig):
+    """Show a chart: Plotly figures interactively (full width, fixed height that
+    fits the screen, following the app's light/dark theme); anything else via show_fig."""
+    if hasattr(fig, "to_plotly_json"):
+        st.plotly_chart(fig, width="stretch", theme="streamlit", config=PLOTLY_CONFIG)
+    else:
+        show_fig(fig)
+
+
 def show_fig(fig, max_height="85vh"):
     """Show a chart as large as possible WITHOUT being taller than the visible
     area: full width, but capped at `max_height` with its shape kept, so the
@@ -201,7 +220,7 @@ def show_range_results(df, key, title, p, views, price_fmt="%.2f", source="Yahoo
     if fig is None:
         st.warning("No valid data for this range.")
     else:
-        show_fig(fig)
+        show_chart(fig)
 
     st.dataframe(df, width="stretch", hide_index=True,
                  column_config=column_config(df, price_fmt))
@@ -266,12 +285,12 @@ def show_ranking_results(df, key, chart_title, name_fmt=None, index=True):
     which = c1.radio("Chart", ["Strongest", "Weakest"], horizontal=True, key=f"{key}_which",
                      help="Ranked by the sum of 30/60/90-day return ranks (lower = stronger)")
     n = c2.slider("How many", 3, 10, 3, key=f"{key}_n")
-    fig = core.plot_index_returns(name_fmt(df) if name_fmt else df, which.lower(), n=n,
+    fig = charts.window_bars(name_fmt(df) if name_fmt else df, which.lower(), n=n,
                                   title_prefix=f"{chart_title}: ")
     if fig is None:
         st.warning("No symbol returned complete data.")
     else:
-        show_fig(fig)
+        show_chart(fig)
     st.dataframe(df, width="stretch", hide_index=not index, column_config=column_config(df))
     st.caption("30D % = latest close vs the close 30 days ago (or the last trading "
                "day before that, if it was a holiday); same for 60D and 90D. "
@@ -409,8 +428,9 @@ def exchange_range_page(ex):
             st.dataframe(by, width="stretch")
 
     short = _short_namer(ex)
-    views = {"Heatmap": lambda d, t: core.plot_gain_grid(short(d), t),
-             "Ranked bars": lambda d, t: core.plot_gain_bars(short(d), t)}
+    group = "Category" if len(cats) != 1 else None
+    views = {"Market map": lambda d, t: charts.market_map(short(d), t, group_col=group),
+             "Ranked bars": lambda d, t: charts.ranked_bars(short(d), t)}
     show_range_results(shown, key, f"{ex} {', '.join(cats) or 'all'} indices", p, views,
                        source=ex, name_fmt=short, live=info.get("live"))
 
@@ -494,10 +514,23 @@ def page_home():
     ], columns=["Tool", "What it shows"]), hide_index=True, width="stretch")
 
 
+@st.cache_data(show_spinner=False)
+def _nifty50_industries():
+    df = pd.read_csv(core.NIFTY50_CSV)
+    return dict(zip(df["Symbol"].str.strip(), df["Industry"].str.strip()))
+
+
+def _with_industry(df):
+    d = df.copy()
+    d["Industry"] = d["Name"].map(_nifty50_industries())
+    return d
+
+
 def page_nifty50():
     names = {s: s[:-3] for s in core.nifty50_symbols()}
     range_tool("nifty50", "Nifty 50 Stock Performance", names,
-               {"Heatmap": core.plot_gain_grid, "Ranked bars": core.plot_gain_bars},
+               {"Market map": lambda d, t: charts.market_map(_with_industry(d), t, group_col="Industry"),
+                "Ranked bars": charts.ranked_bars},
                "Run Nifty 50 scan")
 
 
@@ -507,7 +540,7 @@ def page_world():
 
 def page_custom():
     range_tool("custom", "Global Indices (Date Range)", core.WORLD_INDICES,
-               {"Bars": core.plot_gain_bars},
+               {"Bars": charts.ranked_bars},
                "Compare indices",
                unit_note="Returns are in each index's local currency.")
 
@@ -520,7 +553,7 @@ def page_etfs():
 
 def page_commodities():
     range_tool("commod", "Commodities", core.COMMODITIES,
-               {"Bars": core.plot_gain_bars},
+               {"Bars": charts.ranked_bars},
                "Compare commodities",
                extra="Front-month futures on US/LME-linked exchanges, priced in USD.",
                unit_note="Futures roll each month, so a long range can include "
@@ -529,7 +562,7 @@ def page_commodities():
 
 def page_currencies():
     range_tool("fx", "Currencies vs USD", core.CURRENCIES,
-               {"Bars": core.plot_gain_bars},
+               {"Bars": charts.ranked_bars},
                "Compare currencies", price_fmt="%.6f",
                unit_note="Positive = the currency strengthened against the US dollar; "
                          "negative = it weakened. Price column = USD per 1 unit.")
@@ -583,7 +616,7 @@ def page_seasonality():
             except Exception as e:
                 st.error(str(e))
                 return
-        show_fig(core.plot_seasonality(heat, ticker, n_years))
+        show_chart(charts.seasonality_heatmap(heat, ticker, n_years))
         ratio = st.column_config.NumberColumn(format="percent")
         st.dataframe(summary, width="stretch", hide_index=True,
                      column_config={c: ratio for c in summary.columns
@@ -594,15 +627,15 @@ def page_candle():
     st.header("Candlestick Chart")
     c1, c2, c3 = st.columns([2, 1, 1])
     ticker = c1.text_input("Ticker", "TCS.NS", help="Yahoo symbol, e.g. RELIANCE.NS").strip().upper()
-    start = c2.date_input("Start", today_ist())
-    end = c3.date_input("End", today_ist())
+    start = c2.date_input("Start", today_ist(), key="candle_start")
+    end = c3.date_input("End", today_ist(), key="candle_end")
     if st.button("Generate chart", type="primary") and ticker and valid_range(start, end):
         with st.spinner("Fetching data..."):
             data = cached_ohlc(ticker, str(start), str(end))
         if data.empty:
             st.error(f"No data found for {ticker}")
             return
-        show_fig(core.plot_candles(ticker, data))
+        show_chart(charts.candles(ticker, data))
 
 
 
