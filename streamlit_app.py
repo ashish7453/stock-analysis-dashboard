@@ -35,7 +35,7 @@ import matplotlib.pyplot as plt  # noqa: E402
 
 st.set_page_config(page_title="Analysis Dashboard", page_icon="📈", layout="wide")
 
-DATA_SOURCE = ("Data: Yahoo Finance (delayed) and NSE end-of-day files. "
+DATA_SOURCE = ("Data: Yahoo Finance (delayed) and NSE/BSE end-of-day files. "
                "Not investment advice.")
 CACHE_TTL = 15 * 60          # normal runs: reuse results for 15 minutes
 LIVE_TTL = 55                # live mode: refetch roughly every minute
@@ -270,18 +270,32 @@ def ranking_tool(key, title, names, chart_title=None, show_header=True):
         _ranking_body(key, title, st.session_state[key], chart_title or title)
 
 
-# ============================================== NSE all-indices (NSE EOD file)
+# ====================================== NSE / BSE all-indices (exchange files)
+EXCHANGE_TEXT = {
+    "NSE": {"host": "nsearchives.nseindia.com", "prefix": r"^Nifty\s*", "empty": "Nifty",
+            "live": "today's values come from NSE's live feed (Yahoo as a fallback)"},
+    "BSE": {"host": "www.bseindia.com", "prefix": r"^(S&P\s+)?BSE\s*", "empty": "BSE",
+            "live": "the Sensex is live (Yahoo, ~15 min delay); other BSE indices update "
+                    "when BSE publishes the evening file"},
+}
+
+
 @st.cache_data(ttl=600, show_spinner=False)
-def cached_nse_stats(start: str, end: str, version: int = core.CALC_VERSION):
-    return core.nse_index_stats(start, end)
+def cached_exchange_stats(ex: str, start: str, end: str, version: int = core.CALC_VERSION):
+    return core.nse_index_stats(start, end, ex=ex)
 
 
 @st.cache_data(ttl=60, show_spinner=False)          # includes today: refresh each minute
-def live_nse_stats(start: str, end: str, version: int = core.CALC_VERSION):
-    return core.nse_index_stats(start, end)
+def live_exchange_stats(ex: str, start: str, end: str, version: int = core.CALC_VERSION):
+    return core.nse_index_stats(start, end, ex=ex)
 
 
-def live_badge(live):
+@st.cache_data(ttl=60, show_spinner=False)          # includes today's live values
+def cached_exchange_returns(ex: str, today: str, version: int = core.CALC_VERSION):
+    return core.nse_index_returns(today, ex=ex)
+
+
+def live_badge(live, ex="NSE"):
     """One line saying where today's numbers came from."""
     if not live:
         return
@@ -290,6 +304,11 @@ def live_badge(live):
         st.success(f"🔴 Live: today's values from NSE's live feed as of {live['as_of']} "
                    f"({live['count']} indices). Final closes replace these once NSE publishes "
                    "the evening file.", icon="📡")
+    elif live.get("source") == "Yahoo" and ex == "BSE":
+        st.info(f"🟡 Live: only the Sensex has a live value (Yahoo, {live['as_of']}); BSE's "
+                "live feed blocks automated requests. Other BSE indices show their previous "
+                "close until BSE publishes the evening file; see the Last Date column.",
+                icon="📡")
     elif live.get("source") == "Yahoo":
         st.warning(f"🟡 NSE's live feed is unavailable from this server, so today's values "
                    f"come from Yahoo ({live['as_of']}) for {live['count']} of {total} indices. "
@@ -299,44 +318,56 @@ def live_badge(live):
                    "Showing the latest published closes.")
 
 
-def _short_names(df):
-    """'Nifty Financial Services 25/50' -> 'Financial Services 25/50' for charts."""
-    d = df.copy()
-    d["Name"] = d["Name"].str.replace(r"^Nifty\s*", "", regex=True).str.strip().replace("", "Nifty")
-    return d
+def _short_namer(ex):
+    """'Nifty Financial Services 25/50' -> 'Financial Services 25/50',
+    'BSE Capital Goods' -> 'Capital Goods' (for charts and metric cards)."""
+    t = EXCHANGE_TEXT[ex]
+
+    def short(df):
+        d = df.copy()
+        d["Name"] = (d["Name"].str.replace(t["prefix"], "", regex=True, case=False)
+                     .str.strip().replace("", t["empty"]))
+        return d
+    return short
 
 
-def page_nse_all():
-    key, title = "nseall", "NSE Indices (All, Date Range)"
+_short_names = _short_namer("NSE")
+
+
+def exchange_range_page(ex):
+    key, title = f"{ex.lower()}all", f"{ex} Indices (All, Date Range)"
+    t = EXCHANGE_TEXT[ex]
     st.header(title)
-    st.caption("Every NSE index: sectoral, thematic, strategy and broad market, from "
-               "NSE's own end-of-day file (nsearchives.nseindia.com), not Yahoo. When the "
-               "end date is today, today's values come from NSE's live feed (Yahoo as a "
-               "fallback) until NSE publishes the evening file. Live values refresh every "
-               "minute: click Run again.")
+    st.caption(f"Every {ex} index: sectoral, thematic, strategy and broad market, from "
+               f"{ex}'s own end-of-day file ({t['host']}), not Yahoo. When the end date is "
+               f"today, {t['live']}. Click Run again to refresh (every minute)."
+               + (" BSE keeps about the last 18 months of index files." if ex == "BSE" else ""))
+    cats_all = core.INDEX_SOURCES[ex]["categories"]
     c1, c2, c3 = st.columns([1, 1, 2])
     start = c1.date_input("Start", today_ist(), key=f"{key}_start")
     end = c2.date_input("End", today_ist(), key=f"{key}_end")
-    cats = c3.multiselect("Categories", core.NSE_CATEGORIES, ["Sectoral"], key=f"{key}_cats",
+    cats = c3.multiselect("Categories", cats_all, ["Sectoral"], key=f"{key}_cats",
                           help="Leave empty to show every index")
-    if st.button("Run NSE indices scan", type="primary", key=f"{key}_go") and valid_range(start, end):
+    if st.button(f"Run {ex} indices scan", type="primary", key=f"{key}_go") and valid_range(start, end):
         st.session_state[key] = {"start": str(start), "end": str(end), "live": False}
     p = st.session_state.get(key)
     if not p:
         return
-    with st.spinner("Downloading NSE index files..."):
+    with st.spinner(f"Downloading {ex} index files..."):
         try:
-            fetch = live_nse_stats if pd.Timestamp(p["end"]).date() >= today_ist() else cached_nse_stats
-            df, info = fetch(p["start"], p["end"], version=core.CALC_VERSION)
-            quick = info["quick"]
+            fetch = (live_exchange_stats if pd.Timestamp(p["end"]).date() >= today_ist()
+                     else cached_exchange_stats)
+            df, info = fetch(ex, p["start"], p["end"], version=core.CALC_VERSION)
         except core.DataUnavailable as e:          # not cached: next click retries
             st.error(str(e))
             return
-    if quick:
+    if info.get("note"):
+        st.warning(info["note"])
+    if info["quick"]:
         st.info(f"Long range (over {core.NSE_MAX_FULL_DAYS} trading days): gains use the "
                 "base and end closes only, so range high/low, drawdown and volatility are "
                 "left blank. Use a shorter range for those.", icon="ℹ️")
-    live_badge(info.get("live"))
+    live_badge(info.get("live"), ex)
     shown = df[df["Category"].isin(cats)] if cats else df
     shown = shown.reset_index(drop=True)
 
@@ -349,10 +380,69 @@ def page_nse_all():
         with st.expander("By category", expanded=True):
             st.dataframe(by, width="stretch")
 
-    views = {"Heatmap": lambda d, t: core.plot_gain_grid(_short_names(d), t),
-             "Ranked bars": lambda d, t: core.plot_gain_bars(_short_names(d), t)}
-    show_range_results(shown, key, f"NSE {', '.join(cats) or 'all'} indices", p, views,
-                       source="NSE", name_fmt=_short_names, live=info.get("live"))
+    short = _short_namer(ex)
+    views = {"Heatmap": lambda d, t: core.plot_gain_grid(short(d), t),
+             "Ranked bars": lambda d, t: core.plot_gain_bars(short(d), t)}
+    show_range_results(shown, key, f"{ex} {', '.join(cats) or 'all'} indices", p, views,
+                       source=ex, name_fmt=short, live=info.get("live"))
+
+
+def exchange_ranking_page(ex):
+    key = ex.lower()
+    st.header(f"{ex} Sector Indices")
+    st.caption(f"Every {ex} sectoral index (and, if you choose, thematic, strategy and "
+               "broad-market indices) ranked on 30/60/90-day returns, from "
+               f"{ex}'s own end-of-day file. When today is included, {EXCHANGE_TEXT[ex]['live']}. "
+               "Click Run again to refresh (every minute).")
+    cats_all = core.INDEX_SOURCES[ex]["categories"]
+    c1, c2 = st.columns([3, 1])
+    cats = c1.multiselect("Categories", cats_all, ["Sectoral"], key=f"{key}_cats",
+                          help="Ranks are worked out within the categories you pick. "
+                               "Leave empty for every index.")
+    c2.write("")
+    if c2.button("Run analysis", type="primary", key=f"{key}_go", width="stretch"):
+        st.session_state[key] = True
+    if not st.session_state.get(key):
+        return
+    with st.spinner(f"Downloading 90 days of {ex} index files (first run takes a few seconds)..."):
+        try:
+            raw, info = cached_exchange_returns(ex, str(today_ist()), version=core.CALC_VERSION)
+            last_day = info["last_day"]
+        except core.DataUnavailable as e:          # not cached: next click retries
+            st.error(str(e))
+            return
+    shown = raw[raw["Category"].isin(cats)] if cats else raw
+    if shown.empty:
+        st.warning("No indices in the selected categories.")
+        return
+    df = core.rank_returns(shown)
+    live = info.get("live") or {}
+    upto = ("today's live values" if live.get("source") == "NSE live"
+            else f"the close of {pd.Timestamp(last_day):%a %d-%b-%Y}")
+    st.markdown(f"**Returns up to {upto}** · {len(df)} indices · "
+                f"{', '.join(cats) or 'all categories'}")
+    live_badge(live, ex)
+    if last_day < today_ist() and today_ist().weekday() < 5 and live.get("source") != "NSE live":
+        st.caption(f"⚠️ {ex} has not published {today_ist():%a %d-%b} yet "
+                   "(holiday, or before the evening update).")
+    show_ranking_results(df.reset_index(drop=True), key, f"{ex} " + (", ".join(cats) or "all"),
+                         name_fmt=_short_namer(ex), index=False)
+
+
+def page_nse_all():
+    exchange_range_page("NSE")
+
+
+def page_bse_all():
+    exchange_range_page("BSE")
+
+
+def page_nse():
+    exchange_ranking_page("NSE")
+
+
+def page_bse():
+    exchange_ranking_page("BSE")
 
 
 # ===================================================================== pages
@@ -363,6 +453,8 @@ def page_home():
         ("🇮🇳 Nifty 50 Performance", "All 50 stocks over any date range — heatmap or ranked bars, with drawdown and volatility"),
         ("🇮🇳 NSE Indices (All, Date Range)", "Every NSE sectoral, thematic, strategy and broad-market index over any date range, from NSE's own data"),
         ("🇮🇳 NSE Sector Indices", "Every NSE sectoral index ranked on 30/60/90-day returns, from NSE's own data (thematic/strategy/broad optional)"),
+        ("🇮🇳 BSE Indices (All, Date Range)", "Every BSE index (Sensex, BSE 100/500, sectoral, thematic, strategy) over any date range in the last ~18 months, from BSE's own data"),
+        ("🇮🇳 BSE Sector Indices", "Every BSE sectoral index ranked on 30/60/90-day returns, from BSE's own data"),
         ("🇮🇳 Stock List Ranking", "Upload any CSV of symbols (Nifty Infra, Media, your watchlist…) and rank them on 30/60/90-day returns"),
         ("🌍 World Indices", "20 global indices ranked on 30/60/90-day returns"),
         ("🌍 Global Indices (Date Range)", "20 global indices over a date range you choose"),
@@ -379,52 +471,6 @@ def page_nifty50():
     range_tool("nifty50", "Nifty 50 Performance", names,
                {"Heatmap": core.plot_gain_grid, "Ranked bars": core.plot_gain_bars},
                "Run Nifty 50 scan")
-
-
-@st.cache_data(ttl=60, show_spinner=False)           # includes today's live values
-def cached_nse_returns(today: str, version: int = core.CALC_VERSION):
-    return core.nse_index_returns(today)
-
-
-def page_nse():
-    key = "nse"
-    st.header("NSE Sector Indices")
-    st.caption("Every NSE sectoral index (and, if you choose, thematic, strategy and "
-               "broad-market indices) ranked on 30/60/90-day returns, from NSE's own "
-               "end-of-day file, plus today's live values from NSE's live feed until the "
-               "evening file is out. Click Run again to refresh (every minute).")
-    c1, c2 = st.columns([3, 1])
-    cats = c1.multiselect("Categories", core.NSE_CATEGORIES, ["Sectoral"], key=f"{key}_cats",
-                          help="Ranks are worked out within the categories you pick. "
-                               "Leave empty for every index.")
-    c2.write("")
-    if c2.button("Run analysis", type="primary", key=f"{key}_go", width="stretch"):
-        st.session_state[key] = True
-    if not st.session_state.get(key):
-        return
-    with st.spinner("Downloading 90 days of NSE index files (first run takes a few seconds)..."):
-        try:
-            raw, info = cached_nse_returns(str(today_ist()), version=core.CALC_VERSION)
-            last_day = info["last_day"]
-        except core.DataUnavailable as e:          # not cached: next click retries
-            st.error(str(e))
-            return
-    shown = raw[raw["Category"].isin(cats)] if cats else raw
-    if shown.empty:
-        st.warning("No indices in the selected categories.")
-        return
-    df = core.rank_returns(shown)
-    live = info.get("live") or {}
-    upto = ("today's live values" if live.get("source") == "NSE live"
-            else f"the close of {pd.Timestamp(last_day):%a %d-%b-%Y}")
-    st.markdown(f"**Returns up to {upto}** · {len(df)} indices · "
-                f"{', '.join(cats) or 'all categories'}")
-    live_badge(live)
-    if last_day < today_ist() and today_ist().weekday() < 5 and not live.get("source"):
-        st.caption(f"⚠️ NSE has not published {today_ist():%a %d-%b} yet "
-                   "(holiday, or before the evening update).")
-    show_ranking_results(df.reset_index(drop=True), key, "NSE " + (", ".join(cats) or "all"),
-                         name_fmt=_short_names, index=False)
 
 
 def page_world():
@@ -692,6 +738,8 @@ PAGES = {
     "🇮🇳 Nifty 50 Performance": page_nifty50,
     "🇮🇳 NSE Indices (All, Date Range)": page_nse_all,
     "🇮🇳 NSE Sector Indices": page_nse,
+    "🇮🇳 BSE Indices (All, Date Range)": page_bse_all,
+    "🇮🇳 BSE Sector Indices": page_bse,
     "🇮🇳 Stock List Ranking": page_stock_list,
     "🌍 World Indices": page_world,
     "🌍 Global Indices (Date Range)": page_custom,
