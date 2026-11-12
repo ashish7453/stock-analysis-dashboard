@@ -1,0 +1,15 @@
+# Country-flag emojis (like 🇮🇳) for Chrome/Edge on Windows: Windows has no flag
+# glyphs, so it shows the letters "IN". This loads a small flag-only font
+# (Twemoji Country Flags, MIT, 78 KB) that is used ONLY for flag characters
+# (unicodeRange); all other text keeps Streamlit's normal font. The font is
+# set for the light and dark themes separately so automatic dark mode still works.
+[[theme.fontFaces]]
+family = "Twemoji Country Flags"
+url = "https://cdn.jsdelivr.net/npm/country-flag-emoji-polyfill@0.1.8/dist/TwemojiCountryFlags.woff2"
+unicodeRange = "U+1F1E6-1F1FF, U+1F3F4, U+E0062-E0063, U+E0065, U+E0067, U+E006C, U+E006E, U+E0073-E0074, U+E0077, U+E007F"
+
+[theme.light]
+font = "Twemoji Country Flags, sans-serif"
+
+[theme.dark]
+font = "Twemoji Country Flags, sans-serif"
