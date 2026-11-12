@@ -26,7 +26,7 @@ from matplotlib.colors import LinearSegmentedColormap
 
 HERE = os.path.dirname(os.path.abspath(__file__))
 NIFTY50_CSV = os.path.join(HERE, "ind_nifty50list.csv")
-CALC_VERSION = 9   # bump when calculations change: invalidates Streamlit's cache
+CALC_VERSION = 10   # bump when calculations change: invalidates Streamlit's cache
 MONTHS = ["Jan", "Feb", "Mar", "Apr", "May", "Jun",
           "Jul", "Aug", "Sep", "Oct", "Nov", "Dec"]
 
@@ -507,6 +507,18 @@ def _num(v):
         return np.nan
 
 
+def _browser_session():
+    """A session that looks like Chrome at the TLS level (curl_cffi, which
+    yfinance already installs). NSE/BSE's bot protection rejects plain
+    Python requests by that fingerprint. Falls back to requests."""
+    try:
+        from curl_cffi import requests as creq
+        return creq.Session(impersonate="chrome"), "curl_cffi"
+    except Exception:
+        import requests
+        return requests.Session(), "requests"
+
+
 def nse_live_snapshot(today=None):
     """Today's live/latest value of every NSE index.
 
@@ -523,11 +535,13 @@ def nse_live_snapshot(today=None):
     try:
         if time.time() < _NSE_BLOCKED.get("NSE:live", 0):
             raise ConnectionError("skipped: it did not answer in the last 10 minutes")
-        with requests.Session() as sess:
-            sess.headers.update({**NSE_HEADERS, "Accept": "application/json, text/plain, */*",
+        sess, _kind = _browser_session()
+        with sess:
+            sess.headers.update({"Accept": "application/json, text/plain, */*",
+                                 "Accept-Language": "en-US,en;q=0.9",
                                  "Referer": "https://www.nseindia.com/market-data/live-market-indices"})
-            sess.get("https://www.nseindia.com", timeout=(4, 6))
-            r = sess.get(NSE_LIVE_URL, timeout=(4, 8))
+            sess.get("https://www.nseindia.com", timeout=8)
+            r = sess.get(NSE_LIVE_URL, timeout=10)
         if r.status_code != 200:
             _NSE_BLOCKED["NSE:live"] = time.time() + 600
             raise ConnectionError(f"HTTP {r.status_code}")
@@ -606,6 +620,7 @@ def _add_live_today(frames, columns, end_day, ex="NSE"):
         info["source"] = None
         return info
     info["count"], info["total"] = len(live), len(columns)
+    info["names"] = sorted(live.index)
     frames[today] = live
     return info
 
@@ -780,11 +795,38 @@ def _parse_bse_csv(text):
     return out[~out.index.duplicated()]
 
 
-YAHOO_FOR_BSE = {"BSE SENSEX": "^BSESN", "SENSEX": "^BSESN", "S&P BSE SENSEX": "^BSESN"}
+# Yahoo tickers for BSE indices, with the names BSE's file may use for them.
+# Some Yahoo BSE tickers are stale; only values stamped with TODAY's date are
+# used, and values >20% from the last close are rejected, so dead ones are harmless.
+_YAHOO_BSE = {
+    "^BSESN": ["BSE SENSEX", "SENSEX", "S&P BSE SENSEX"],
+    "BSE-BANK.BO": ["BSE BANKEX", "BANKEX", "S&P BSE BANKEX"],
+    "BSE-AUTO.BO": ["BSE Auto"],
+    "BSE-IT.BO": ["BSE IT", "BSE Information Technology"],
+    "BSE-FMCG.BO": ["BSE FMCG", "BSE Fast Moving Consumer Goods"],
+    "BSE-HC.BO": ["BSE Healthcare"],
+    "BSE-METAL.BO": ["BSE Metal"],
+    "BSE-POWER.BO": ["BSE Power"],
+    "BSE-CG.BO": ["BSE Capital Goods"],
+    "BSE-CD.BO": ["BSE Consumer Durables"],
+    "BSE-OILGAS.BO": ["BSE Oil & Gas"],
+    "BSE-REALTY.BO": ["BSE Realty"],
+    "BSE-TECK.BO": ["BSE Teck", "BSE TECk"],
+    "BSE-PSU.BO": ["BSE PSU"],
+    "BSE-100.BO": ["BSE 100"],
+    "BSE-200.BO": ["BSE 200"],
+    "BSE-500.BO": ["BSE 500"],
+    "BSE-MIDCAP.BO": ["BSE MidCap"],
+    "BSE-SMLCAP.BO": ["BSE SmallCap"],
+}
+YAHOO_FOR_BSE = {alias: sym for sym, names in _YAHOO_BSE.items() for alias in names}
+for _alias in list(YAHOO_FOR_BSE):            # also match the 'S&P BSE ...' spelling
+    YAHOO_FOR_BSE.setdefault("S&P " + _alias, YAHOO_FOR_BSE[_alias])
 
 
 def bse_live_snapshot(today=None):
-    """BSE's live API blocks scripts, so only the Sensex (via Yahoo) is live."""
+    """BSE's live API blocks scripts, so today's BSE values come from Yahoo,
+    for the BSE indices Yahoo still updates."""
     today = today or _today_ist()
     info = {"source": None, "as_of": "", "count": 0,
             "error": "BSE's live feed blocks automated requests"}
