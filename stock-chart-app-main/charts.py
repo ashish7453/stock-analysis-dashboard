@@ -106,11 +106,9 @@ def ranked_bars(df, title, value_col="Gain (%)", height=540):
         customdata=[_hover_details(r) for _, r in d.iterrows()],
         hovertemplate="<b>%{x}</b><br>Gain %{y:+.2f}%<br>%{customdata}<extra></extra>",
     ))
-    span = float(np.abs(g).max()) or 1.0
     fig.update_yaxes(ticksuffix="%", zeroline=True, zerolinewidth=1.5,
-                     range=[min(0, g.min()) - span * (0.28 if many else 0.15),
-                            max(0, g.max()) + span * (0.28 if many else 0.15)])
-    fig.update_xaxes(tickangle=-90 if many else -30, tickfont=dict(size=11 if many else 13))
+                     range=_range(min(0, g.min()), max(0, g.max()), 0.28 if many else 0.15))
+    fig.update_xaxes(tickangle=-90 if many else -30, tickfont=dict(size=11 if many else 15))
     fig.update_layout(bargap=0.18, showlegend=False)
     return _base_layout(fig, title, height)
 
@@ -130,11 +128,12 @@ def window_bars(df, which="strongest", n=3, title_prefix="", height=520):
         fig.add_bar(name=c.replace(" %", "ays").replace("D", " d", 1), x=pick["Name"], y=vals,
                     marker_color=WINDOW_COLORS[i % len(WINDOW_COLORS)],
                     text=[f"{v:+.2f}%" for v in vals], textposition="outside", cliponaxis=False,
+                    textfont=dict(size=14),
                     hovertemplate="<b>%{x}</b><br>" + c.replace(" %", "") + ": %{y:+.2f}%<extra></extra>")
     allv = pick[ret_cols].to_numpy(float)
-    span = float(np.nanmax(np.abs(allv))) or 1.0
     fig.update_yaxes(ticksuffix="%", zeroline=True, zerolinewidth=1.5,
-                     range=[min(0, np.nanmin(allv)) - span * 0.15, max(0, np.nanmax(allv)) + span * 0.15])
+                     range=_range(min(0, np.nanmin(allv)), max(0, np.nanmax(allv)), 0.15))
+    fig.update_xaxes(tickfont=dict(size=17), tickprefix="<b>", ticksuffix="</b>")
     fig.update_layout(barmode="group", bargap=0.25, bargroupgap=0.06,
                       legend=dict(orientation="h", y=1.02, x=1, xanchor="right", yanchor="bottom"))
     title = f"{title_prefix}{which.title()} {len(pick)} by sum of 30/60/90-day ranks"
@@ -194,3 +193,30 @@ def candles(ticker, data, height=640):
     first, last = d.index[0], d.index[-1]
     chg = (d["Close"].iloc[-1] / d["Close"].iloc[0] - 1) * 100 if len(d) > 1 else 0.0
     return _base_layout(fig, f"{ticker}  ·  {first:%d %b %Y} – {last:%d %b %Y}  ·  {chg:+.2f}%", height)
+
+
+def apply_ink(fig, ink):
+    """Make chart text solid black (light theme) or white (dark theme): titles,
+    axis labels, legend, colour-bar labels and the value labels above bars.
+    Text drawn on coloured tiles (market map, heatmap) stays white."""
+    fig.update_layout(font_color=ink, title_font_color=ink, legend_font_color=ink)
+    fig.update_xaxes(tickfont_color=ink, title_font_color=ink)
+    fig.update_yaxes(tickfont_color=ink, title_font_color=ink)
+    for tr in fig.data:
+        if tr.type == "bar" and tr.text is not None:
+            tr.textfont.color = ink
+        if tr.type == "treemap":
+            tr.marker.colorbar.tickfont.color = ink
+            tr.marker.colorbar.title.font.color = ink
+            tr.pathbar.textfont.color = ink
+        if tr.type == "heatmap":
+            tr.colorbar.tickfont.color = ink
+            tr.colorbar.title.font.color = ink
+    return fig
+
+
+def _range(lo, hi, pad):
+    """Y-axis range with room for value labels; only extends below 0 when a
+    value is negative (so labels sit close to the bars)."""
+    span = max(abs(lo), abs(hi)) or 1.0
+    return [lo - span * pad if lo < 0 else 0, hi + span * pad if hi > 0 else 0]
