@@ -8,6 +8,7 @@ Run locally:   streamlit run streamlit_app.py
 """
 import io
 import os
+import re
 import sys
 from datetime import date, datetime, timedelta
 from zoneinfo import ZoneInfo
@@ -456,7 +457,7 @@ def page_bse():
 # ===================================================================== pages
 def page_home():
     st.title("Analysis Dashboard")
-    st.caption("Pick a tool from the sidebar.")
+    st.caption("Pick a tool from the Tool menu above.")
     st.dataframe(pd.DataFrame([
         ("🇮🇳 Nifty 50 Performance", "All 50 stocks over any date range — heatmap or ranked bars, with drawdown and volatility"),
         ("🇮🇳 NSE Indices (All, Date Range)", "Every NSE sectoral, thematic, strategy and broad-market index over any date range, from NSE's own data"),
@@ -603,10 +604,23 @@ PAGES = {
     "🕯️ Candlestick Chart": page_candle,
 }
 
-with st.sidebar:
-    st.title("📈 Analysis")
-    choice = st.radio("Tool", list(PAGES), label_visibility="collapsed")
-    st.divider()
-    st.caption(DATA_SOURCE)
+def _slug(name):
+    """'🇮🇳 NSE Sector Indices' -> 'nse-sector-indices' (for ?tool= links)."""
+    return re.sub(r"[^a-z0-9]+", "-", name.encode("ascii", "ignore").decode().lower()).strip("-")
+
+
+# No sidebar: tools are picked from a dropdown at the top of the page. The
+# choice is kept in the address (?tool=...), so a link or an embedded page can
+# open one tool directly.
+_by_slug = {_slug(n): n for n in PAGES}
+_names = list(PAGES)
+_wanted = _by_slug.get(str(st.query_params.get("tool", "")).lower(), _names[0])
+
+c1, c2 = st.columns([2, 3], vertical_alignment="bottom")
+choice = c1.selectbox("Tool", _names, index=_names.index(_wanted), key="tool")
+c2.caption(DATA_SOURCE)
+if _slug(choice) != st.query_params.get("tool"):
+    st.query_params["tool"] = _slug(choice)
+st.divider()
 
 PAGES[choice]()
