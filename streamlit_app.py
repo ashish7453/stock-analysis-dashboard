@@ -376,6 +376,18 @@ def _short_namer(ex):
 _short_names = _short_namer("NSE")
 
 
+def category_summary(shown, cats):
+    """Median / best / worst gain per category, when more than one is shown."""
+    if len(cats) != 1 and not shown.dropna(subset=["Gain (%)"]).empty:
+        by = (shown.dropna(subset=["Gain (%)"]).groupby("Category")["Gain (%)"]
+                   .agg(["count", "median", "max", "min"]).round(2)
+                   .rename(columns={"count": "Indices", "median": "Median gain (%)",
+                                    "max": "Best (%)", "min": "Worst (%)"})
+                   .sort_values("Median gain (%)", ascending=False))
+        with st.expander("By category", expanded=True):
+            st.dataframe(by, width="stretch")
+
+
 def exchange_range_page(ex):
     key, title = f"{ex.lower()}all", f"{ex} Indices (All, Date Range)"
     t = EXCHANGE_TEXT[ex]
@@ -420,14 +432,7 @@ def exchange_range_page(ex):
                    f"{'is' if len(today_rows) == 1 else 'are'} not in the selected categories. "
                    "Add that category, or pick an earlier end date.")
 
-    if len(cats) != 1 and not shown.dropna(subset=["Gain (%)"]).empty:
-        by = (shown.dropna(subset=["Gain (%)"]).groupby("Category")["Gain (%)"]
-                   .agg(["count", "median", "max", "min"]).round(2)
-                   .rename(columns={"count": "Indices", "median": "Median gain (%)",
-                                    "max": "Best (%)", "min": "Worst (%)"})
-                   .sort_values("Median gain (%)", ascending=False))
-        with st.expander("By category", expanded=True):
-            st.dataframe(by, width="stretch")
+    category_summary(shown, cats)
 
     short = _short_namer(ex)
     group = "Category" if len(cats) != 1 else None
@@ -508,6 +513,8 @@ def page_home():
         ("🇮🇳 Stock List Ranking", "Upload any CSV of symbols (Nifty Infra, Media, your watchlist…) and rank them on 30/60/90-day returns"),
         ("🌍 World Indices", "20 global indices ranked on 30/60/90-day returns"),
         ("🌍 Global Indices (Date Range)", "20 global indices over a date range you choose"),
+        ("🇺🇸 USA Sectors & Themes (Date Range)", "S&P 500 sectors and US thematic indices (semiconductors, biotech, banks, AI, cybersecurity, clean energy…) over any date range"),
+        ("🇺🇸 USA Sector & Theme Rankings", "The same US sectors and themes ranked on 30/60/90-day returns"),
         ("🌍 Country ETFs (USA)", "44 US-listed single-country ETFs ranked on 30/60/90-day returns"),
         ("🛢️ Commodities", "Gold, silver, oil, gas, base metals over a date range, with optional live refresh"),
         ("💱 Currencies vs USD", "16 currencies' moves against the US dollar over a date range"),
@@ -545,6 +552,74 @@ def page_custom():
                {"Bars": charts.ranked_bars},
                "Compare indices",
                unit_note="Returns are in each index's local currency.")
+
+
+# ================================================ USA sectoral & thematic
+US_NAMES = {sym: name for sym, (name, _) in core.US_INDICES.items()}
+US_CAT = {sym: cat for sym, (_, cat) in core.US_INDICES.items()}
+US_NOTE = ("S&P 500 sector indices and US thematic indices from Yahoo Finance, in USD. "
+           "Themes with no index on Yahoo use the leading thematic ETF, marked (ETF). "
+           "Values include today's US session (about 15 minutes delayed).")
+
+
+def page_us_range():
+    key, title = "usrange", "USA Sectors & Themes (Date Range)"
+    st.header(title)
+    st.caption(US_NOTE)
+    c1, c2, c3 = st.columns([1, 1, 2])
+    start = c1.date_input("Start", today_ist(), key=f"{key}_start")
+    end = c2.date_input("End", today_ist(), key=f"{key}_end")
+    cats = c3.multiselect("Categories", core.US_CATEGORIES, ["Sectoral", "Thematic"],
+                          key=f"{key}_cats", help="Leave empty to show everything")
+    if st.button("Run USA scan", type="primary", key=f"{key}_go") and valid_range(start, end):
+        st.session_state[key] = {"start": str(start), "end": str(end), "live": False}
+    p = st.session_state.get(key)
+    if not p:
+        return
+    with st.spinner(f"Fetching {len(US_NAMES)} US indices..."):
+        try:
+            df = cached_range_stats(US_NAMES, p["start"], p["end"], version=core.CALC_VERSION)
+        except core.DataUnavailable as e:          # not cached: next click retries
+            st.error(str(e))
+            return
+    df = df.copy()
+    df.insert(1, "Category", df["Symbol"].map(US_CAT))
+    shown = (df[df["Category"].isin(cats)] if cats else df).reset_index(drop=True)
+    category_summary(shown, cats)
+    group = "Category" if len(cats) != 1 else None
+    views = {"Market map": lambda d, t: charts.market_map(d, t, group_col=group),
+             "Ranked bars": charts.ranked_bars}
+    show_range_results(shown, key, f"USA {', '.join(cats) or 'all'}", p, views,
+                       source="Yahoo Finance")
+
+
+def page_us_rank():
+    key = "usrank"
+    st.header("USA Sector & Theme Rankings")
+    st.caption(US_NOTE + " Ranks are worked out within the categories you pick.")
+    c1, c2 = st.columns([3, 1])
+    cats = c1.multiselect("Categories", core.US_CATEGORIES, ["Sectoral", "Thematic"],
+                          key=f"{key}_cats", help="Leave empty to rank everything")
+    c2.write("")
+    if c2.button("Run analysis", type="primary", key=f"{key}_go", width="stretch"):
+        st.session_state[key] = True
+    if not st.session_state.get(key):
+        return
+    with st.spinner(f"Pulling 30/60/90-day returns for {len(US_NAMES)} US indices..."):
+        try:
+            raw = cached_index_returns(US_NAMES, str(today_ist()), version=core.CALC_VERSION)
+        except Exception as e:
+            st.error(f"Error: {e}")
+            return
+    raw = raw.copy()
+    raw.insert(1, "Category", raw.index.map(US_CAT))
+    shown = raw[raw["Category"].isin(cats)] if cats else raw
+    if shown.empty:
+        st.warning("No indices in the selected categories.")
+        return
+    df = core.rank_returns(shown)
+    st.markdown(f"**{len(df)} US indices** · {', '.join(cats) or 'all categories'}")
+    show_ranking_results(df, key, "USA " + (", ".join(cats) or "all"))
 
 
 def page_etfs():
@@ -652,6 +727,8 @@ PAGES = {
     "🌍 World Indices": page_world,
     "🌍 Global Indices (Date Range)": page_custom,
     "🌍 Country ETFs (USA)": page_etfs,
+    "🇺🇸 USA Sectors & Themes (Date Range)": page_us_range,
+    "🇺🇸 USA Sector & Theme Rankings": page_us_rank,
     "🛢️ Commodities": page_commodities,
     "💱 Currencies vs USD": page_currencies,
     "📅 Seasonality": page_seasonality,
