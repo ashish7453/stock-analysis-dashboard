@@ -466,7 +466,7 @@ def page_home():
     st.title("Analysis Dashboard")
     st.caption("Pick a tool from the Tool menu above.")
     st.dataframe(pd.DataFrame([
-        ("🇮🇳 Nifty 50 Performance", "All 50 stocks over any date range — heatmap or ranked bars, with drawdown and volatility"),
+        ("🇮🇳 Nifty 50 Stock Performance", "All 50 stocks over any date range — heatmap or ranked bars, with drawdown and volatility"),
         ("🇮🇳 NSE Indices (All, Date Range)", "Every NSE sectoral, thematic, strategy and broad-market index over any date range, from NSE's own data"),
         ("🇮🇳 NSE Sector Indices", "Every NSE sectoral index ranked on 30/60/90-day returns, from NSE's own data (thematic/strategy/broad optional)"),
         ("🇮🇳 BSE Indices (All, Date Range)", "Every BSE index (Sensex, BSE 100/500, sectoral, thematic, strategy) over any date range in the last ~18 months, from BSE's own data"),
@@ -484,7 +484,7 @@ def page_home():
 
 def page_nifty50():
     names = {s: s[:-3] for s in core.nifty50_symbols()}
-    range_tool("nifty50", "Nifty 50 Performance", names,
+    range_tool("nifty50", "Nifty 50 Stock Performance", names,
                {"Heatmap": core.plot_gain_grid, "Ranked bars": core.plot_gain_bars},
                "Run Nifty 50 scan")
 
@@ -596,7 +596,7 @@ def page_candle():
 
 PAGES = {
     "Home": page_home,
-    "🇮🇳 Nifty 50 Performance": page_nifty50,
+    "🇮🇳 Nifty 50 Stock Performance": page_nifty50,
     "🇮🇳 NSE Indices (All, Date Range)": page_nse_all,
     "🇮🇳 NSE Sector Indices": page_nse,
     "🇮🇳 BSE Indices (All, Date Range)": page_bse_all,
@@ -620,6 +620,7 @@ def _slug(name):
 # choice is kept in the address (?tool=...), so a link or an embedded page can
 # open one tool directly.
 _by_slug = {_slug(n): n for n in PAGES}
+_by_slug["nifty-50-performance"] = "🇮🇳 Nifty 50 Stock Performance"   # old link keeps working
 _names = list(PAGES)
 _wanted = _by_slug.get(str(st.query_params.get("tool", "")).lower(), _names[0])
 
