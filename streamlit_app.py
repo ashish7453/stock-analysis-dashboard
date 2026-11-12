@@ -1,684 +1,888 @@
 """
-Streamlit UI for the Analysis Dashboard.
+Analysis functions + the original Flask UI.
 
-All calculations live in `stock-chart-app-main/app.py` (shared with the Flask UI);
-this file only handles inputs, caching and rendering.
-
-Run locally:   streamlit run streamlit_app.py
+All market logic lives here so that both front-ends (Flask routes below and
+../streamlit_app.py) use exactly the same calculations. The functions return
+plain DataFrames / matplotlib Figures; each UI decides how to render them.
 """
+import base64
 import io
+import re
+import math
 import os
-import sys
-from datetime import date, datetime, timedelta
-from zoneinfo import ZoneInfo
+import time
+from datetime import datetime, timedelta, timezone
 
+import matplotlib
+matplotlib.use("Agg")                 # headless backend: no GUI, safe on servers
+import matplotlib.pyplot as plt
+import mplfinance as mpf
+import numpy as np
 import pandas as pd
-import streamlit as st
+import seaborn as sns
+import yfinance as yf
+from flask import Flask, render_template, request
+from matplotlib.colors import LinearSegmentedColormap
 
 HERE = os.path.dirname(os.path.abspath(__file__))
-APP_DIR = os.path.join(HERE, "stock-chart-app-main")
-if APP_DIR not in sys.path:
-    sys.path.insert(0, APP_DIR)
+NIFTY50_CSV = os.path.join(HERE, "ind_nifty50list.csv")
+CALC_VERSION = 7   # bump when calculations change: invalidates Streamlit's cache
+MONTHS = ["Jan", "Feb", "Mar", "Apr", "May", "Jun",
+          "Jul", "Aug", "Sep", "Oct", "Nov", "Dec"]
 
-import importlib                 # noqa: E402
-import app as core               # noqa: E402  (needs the sys.path tweak above)
+# ------------------------------------------------------------------ universes
+NSE_INDICES = {
+    '^NSEI': 'Nifty 50', '^CNXIT': 'Nifty IT', '^CNXREALTY': 'Nifty Realty',
+    '^CNXINFRA': 'Nifty Infrastructure', '^CNXAUTO': 'Nifty Auto',
+    '^CNXMETAL': 'Nifty Metal', '^CNXCMDT': 'Nifty Commodities',
+    '^CNXPSUBANK': 'Nifty PSU Bank', '^NSEBANK': 'Nifty Bank',
+    'NIFTY_PVT_BANK.NS': 'Nifty Private Bank', '^CNXPSE': 'Nifty PSE',
+    '^CNXENERGY': 'Nifty Energy', '^CNXMNC': 'Nifty MNC', '^CNXFMCG': 'Nifty FMCG',
+    'NIFTY_FIN_SERVICE.NS': 'Nifty Financial Services', '^CNXMEDIA': 'Nifty Media',
+    '^CNXCONSUM': 'Nifty Consumption', '^CNXSERVICE': 'Nifty Services Sector',
+    'NIFTY_MIDCAP_100.NS': 'Nifty Midcap 100', 'BSE-SMLCAP.BO': 'BSE SmallCap',
+    '^CNXSC': 'Nifty Smallcap', '^CNXPHARMA': 'Nifty Pharma',
+}
+WORLD_INDICES = {
+    '^NSEI': 'Nifty 50', '^HSI': 'Hang Seng', '^DJI': 'Dow Jones', '^IXIC': 'Nasdaq',
+    '^FTSE': 'FTSE 100 UK', '^GDAXI': 'DAX Germany', '^FCHI': 'CAC 40 France',
+    '^STOXX50E': 'EURO STOXX 50', '^N225': 'Nikkei 225 Japan',
+    '^JKSE': 'JKSE Indonesia', '^KLSE': 'KLSE Malaysia', '^KS11': 'KOSPI South Korea',
+    '^TWII': 'TSEC Taiwan', '^BVSP': 'BOVESPA Brazil', '^MXX': 'MXX Mexico',
+    '^TA125.TA': 'TA125 Tel Aviv', '^STI': 'STI Singapore',
+    'PSEI.PS': 'PSEI Philippines', '^BSESN': 'Sensex', '^GSPTSE': 'S&P/TSX Canada',
+}
 
-# Streamlit Cloud re-runs this file when the repo updates, but can keep the OLD
-# `app` module in memory, mixing new UI code with old calculations. Reload it
-# whenever app.py changes on disk, and drop results cached by the old code.
-_mtime = os.path.getmtime(core.__file__)
-if getattr(core, "_loaded_mtime", None) != _mtime:   # also catches modules loaded by older code
-    core = importlib.reload(core)
-    st.cache_data.clear()
-core._loaded_mtime = _mtime
-import matplotlib.pyplot as plt  # noqa: E402
-
-st.set_page_config(page_title="Analysis Dashboard", page_icon="📈", layout="wide")
-
-DATA_SOURCE = ("Data: Yahoo Finance (delayed) and NSE end-of-day files. "
-               "Not investment advice.")
-CACHE_TTL = 15 * 60          # normal runs: reuse results for 15 minutes
-LIVE_TTL = 55                # live mode: refetch roughly every minute
-LIVE_EVERY = 60              # live mode refresh interval (seconds)
-IST = ZoneInfo("Asia/Kolkata")
-PCT = st.column_config.NumberColumn(format="%.2f%%")
-
-
-def today_ist():
-    """Today's date in India. The hosting server runs on UTC, so date.today()
-    would still say 'yesterday' between 00:00 and 05:30 IST."""
-    return datetime.now(IST).date()
-
-
-# --------------------------------------------------------------- cached data
-@st.cache_data(ttl=CACHE_TTL, show_spinner=False)
-def cached_range_stats(names: dict, start: str, end: str, version: int = core.CALC_VERSION):
-    return core.range_stats(names, start, end)
-
-
-@st.cache_data(ttl=LIVE_TTL, show_spinner=False)
-def live_range_stats(names: dict, start: str, end: str, version: int = core.CALC_VERSION):
-    return core.range_stats(names, start, end)
-
-
-@st.cache_data(ttl=CACHE_TTL, show_spinner=False)
-def cached_index_returns(names: dict, today: str, version: int = core.CALC_VERSION):
-    return core.compute_index_returns(names, reference_date=today)
-
-
-@st.cache_data(ttl=CACHE_TTL, show_spinner=False)
-def cached_seasonality(ticker: str, years: int, include_partial: bool):
-    return core.seasonality_tables(ticker, years, include_partial)
-
-
-@st.cache_data(ttl=CACHE_TTL, show_spinner=False)
-def cached_ohlc(ticker: str, start: str, end: str):
-    return core.download_ohlc(ticker, start, end)
-
-
-# ------------------------------------------------------------------- helpers
-def show_fig(fig):
-    st.pyplot(fig, clear_figure=True)
-    plt.close(fig)
+COMMODITIES = {
+    'GC=F': 'Gold', 'SI=F': 'Silver', 'PL=F': 'Platinum', 'PA=F': 'Palladium',
+    'HG=F': 'Copper', 'ALI=F': 'Aluminium', 'CL=F': 'Crude Oil (WTI)',
+    'BZ=F': 'Crude Oil (Brent)', 'NG=F': 'Natural Gas',
+}
+# Quoted as USD per 1 unit of the currency, so a positive gain means that
+# currency STRENGTHENED against the US dollar.
+CURRENCIES = {
+    'INRUSD=X': 'Rupee (India)', 'JPYUSD=X': 'Yen (Japan)', 'GBPUSD=X': 'Pound (UK)',
+    'EURUSD=X': 'Euro (Eurozone)', 'CNYUSD=X': 'Yuan (China)', 'CADUSD=X': 'Dollar (Canada)',
+    'AUDUSD=X': 'Dollar (Australia)', 'BRLUSD=X': 'Real (Brazil)',
+    'ZARUSD=X': 'Rand (South Africa)', 'MYRUSD=X': 'Ringgit (Malaysia)',
+    'SGDUSD=X': 'Dollar (Singapore)', 'NZDUSD=X': 'Dollar (New Zealand)',
+    'IDRUSD=X': 'Rupiah (Indonesia)', 'KRWUSD=X': 'Won (South Korea)',
+    'MXNUSD=X': 'Peso (Mexico)', 'THBUSD=X': 'Baht (Thailand)',
+}
+COUNTRY_ETFS = {sym: f"{country} ({sym})" for sym, country in [
+    ("EWA", "Australia"), ("EWO", "Austria"), ("EWK", "Belgium"), ("EWZ", "Brazil"),
+    ("EWC", "Canada"), ("ECH", "Chile"), ("FXI", "China"), ("GXG", "Colombia"),
+    ("EDEN", "Denmark"), ("EFNL", "Finland"), ("EWQ", "France"), ("EWG", "Germany"),
+    ("GREK", "Greece"), ("EWH", "Hong Kong"), ("INDA", "India"), ("EPI", "India"),
+    ("EIDO", "Indonesia"), ("EIRL", "Ireland"), ("EIS", "Israel"), ("EWI", "Italy"),
+    ("EWJ", "Japan"), ("EWY", "South Korea"), ("KWT", "Kuwait"), ("EWM", "Malaysia"),
+    ("EWW", "Mexico"), ("EWN", "Netherlands"), ("ENZL", "New Zealand"), ("NORW", "Norway"),
+    ("EPHE", "Philippines"), ("EPOL", "Poland"), ("QAT", "Qatar"), ("KSA", "Saudi Arabia"),
+    ("EWS", "Singapore"), ("EZA", "South Africa"), ("EWP", "Spain"), ("EWD", "Sweden"),
+    ("EWL", "Switzerland"), ("EWT", "Taiwan"), ("THD", "Thailand"), ("TUR", "Turkey"),
+    ("UAE", "UAE"), ("EWU", "United Kingdom"), ("VNM", "Vietnam"), ("ARGT", "Argentina"),
+]}
 
 
-def valid_range(start, end):
-    if start > end:
-        st.error("Start date must be on or before the end date.")
-        return False
-    if end > today_ist():
-        st.warning("End date is in the future; data runs up to the latest close.")
-    return True
+def nifty50_symbols():
+    """Yahoo symbols for the constituents in ind_nifty50list.csv."""
+    df = pd.read_csv(NIFTY50_CSV)
+    return [f"{s.strip()}.NS" for s in df["Symbol"].dropna()]
 
 
-def column_config(df, price_fmt="%.2f"):
-    cfg = {}
-    for c in df.columns:
-        if c.endswith("(%)") or c.endswith("D %") or c.endswith("High %"):
-            cfg[c] = PCT
-        elif "Price" in c or "Value" in c or c in ("Range High", "Range Low"):
-            cfg[c] = st.column_config.NumberColumn(format=price_fmt)
-        elif c.startswith("Rank") or c == "Sum of Ranks":
-            cfg[c] = st.column_config.NumberColumn(format="%d")
-    return cfg
+def symbols_from_csv(df, suffix=".NS", limit=500):
+    """{yahoo_symbol: display_name} from an uploaded CSV. Uses a 'Symbol' /
+    'Ticker' column (any case), or the first column. Symbols that already carry
+    an exchange suffix or are indices/futures ('TCS.BO', '^NSEI', 'GC=F') are
+    kept as-is."""
+    cols = {str(c).lower().strip(): c for c in df.columns}
+    col = cols.get("symbol") or cols.get("ticker") or df.columns[0]
+    names = {}
+    for raw in df[col].dropna().astype(str).str.strip().str.upper():
+        if not raw or raw in ("SYMBOL", "TICKER"):
+            continue
+        sym = raw if ("." in raw or raw.startswith("^") or "=" in raw) else raw + suffix
+        names[sym] = raw.split(".")[0]
+    return dict(list(names.items())[:limit])
 
 
-def download_buttons(df, filename, key, index=False):
-    c1, c2, _ = st.columns([1, 1, 4])
-    c1.download_button("⬇ CSV", df.to_csv(index=index).encode(), f"{filename}.csv",
-                       "text/csv", key=f"{key}_csv")
-    buf = io.BytesIO()
-    df.to_excel(buf, index=index, sheet_name="Results")
-    c2.download_button("⬇ Excel", buf.getvalue(), f"{filename}.xlsx",
-                       "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
-                       key=f"{key}_xlsx")
+# ------------------------------------------------------------- data helpers
+def _naive_utc_now():
+    return datetime.now(timezone.utc).replace(tzinfo=None)
 
 
-def summary_metrics(df, col="Gain (%)", name_fmt=None):
-    """Breadth + best/worst row of st.metric cards."""
-    v = df.dropna(subset=[col])
-    if name_fmt is not None:
-        v = name_fmt(v)
-    if v.empty:
-        return
-    best, worst = v.iloc[0], v.iloc[-1]
-    m = st.columns(5)
-    m[0].metric("Advancing", int((v[col] > 0).sum()))
-    m[1].metric("Declining", int((v[col] < 0).sum()))
-    m[2].metric("Median", f"{v[col].median():.2f}%")
-    m[3].metric("Best", best["Name"], f"{best[col]:.2f}%")
-    m[4].metric("Worst", worst["Name"], f"{worst[col]:.2f}%")
+def flatten_columns(df):
+    """yfinance >= 0.2.48 returns (Price, Ticker) MultiIndex columns even for
+    one ticker; keep only the Price level."""
+    if isinstance(df.columns, pd.MultiIndex):
+        df = df.copy()
+        df.columns = df.columns.get_level_values(0)
+    return df
 
 
-def missing_note(df, col):
-    missing = df[df[col].isna()]["Name"].tolist() if col in df else []
+def strip_tz(df):
+    """Drop timezone info. Guarded: a failed download has a RangeIndex, which
+    has no .tz attribute (this crashed the NSE page when a ticker was dead)."""
+    if isinstance(df.index, pd.DatetimeIndex) and df.index.tz is not None:
+        df = df.copy()
+        df.index = df.index.tz_localize(None)
+    return df
+
+
+def _to_date(d):
+    return pd.Timestamp(d).strftime("%Y-%m-%d")
+
+
+def _request_end(end):
+    """yfinance `end` to send Yahoo. Asking for exactly the day after `end`
+    sometimes makes Yahoo leave out the last daily bar (seen live: an end
+    date of Fri 6-Nov returned data only up to Thu 5-Nov). So ask for 4 extra
+    days and trim to `end` ourselves with _trim_to()."""
+    return _to_date(pd.Timestamp(end) + timedelta(days=4))
+
+
+def _trim_to(df, end):
+    """Keep rows dated on or before `end` (inclusive)."""
+    if df.empty or not isinstance(df.index, pd.DatetimeIndex):
+        return df
+    return df[df.index < pd.Timestamp(end).normalize() + timedelta(days=1)]
+
+
+def download_ohlc(symbol, start, end, interval="1d"):
+    """OHLCV for one symbol. `end` is INCLUSIVE here (yfinance's is exclusive)."""
+    data = yf.download(symbol, start=_to_date(start), end=_request_end(end),
+                       interval=interval, auto_adjust=True, progress=False)
+    data = _trim_to(strip_tz(flatten_columns(data)), end)
+    if data.empty or "Close" not in data.columns:
+        return pd.DataFrame()
+    return data.dropna(subset=["Close"])
+
+
+class DataUnavailable(RuntimeError):
+    """Yahoo returned no prices at all (rate limit, outage or blocked IP).
+    Raised instead of returning an empty table so callers (and Streamlit's
+    cache) never treat a failed download as a real, cacheable result."""
+
+
+def _yahoo_errors():
+    try:
+        import yfinance.shared as shared
+        return dict(getattr(shared, "_ERRORS", {}) or {})
+    except Exception:
+        return {}
+
+
+def _download_close_table(symbols, start, end_req, threads=True):
+    # auto_adjust=False -> real exchange closing prices (split-adjusted only),
+    # so Base/Last Price match NSE's published closes. Dividend-adjusted
+    # prices (auto_adjust=True) lowered the base price of any stock that went
+    # ex-dividend inside the range, so its gain did not match NSE.
+    data = yf.download(symbols, start=start, end=end_req, auto_adjust=False,
+                       progress=False, group_by="column", threads=threads)
+    if data is None or data.empty:
+        return pd.DataFrame(columns=symbols, dtype=float)
+    if isinstance(data.columns, pd.MultiIndex):
+        closes = data["Close"]
+    else:                                  # very old yfinance, single symbol
+        closes = data[["Close"]].set_axis(symbols[:1], axis=1)
+    if isinstance(closes, pd.Series):
+        closes = closes.to_frame(symbols[0])
+    return strip_tz(closes.reindex(columns=symbols).astype(float))
+
+
+def download_closes(symbols, start, end, retry_wait=2.0):
+    """Closing prices for many symbols in ONE batched request
+    (rows = dates, columns = symbols). `end` is inclusive.
+
+    Symbols Yahoo skipped (rate limit / hiccup) are retried once, one at a
+    time. Symbols that still have no data come back as all-NaN columns.
+    If NO symbol has data, raises DataUnavailable with Yahoo's message."""
+    symbols = list(symbols)
+    start_s = _to_date(start)
+    end_req = _request_end(end)
+    closes = _trim_to(_download_close_table(symbols, start_s, end_req), end)
+
+    missing = [s for s in symbols if closes[s].dropna().empty]
     if missing:
-        st.caption("No data from Yahoo for: " + ", ".join(missing))
+        time.sleep(retry_wait)
+        again = _trim_to(_download_close_table(missing, start_s, end_req, threads=False), end)
+        got = [s for s in missing if not again[s].dropna().empty]
+        if got:
+            closes = closes.combine_first(again[got]).reindex(columns=symbols)
+
+    if all(closes[s].dropna().empty for s in symbols):
+        errs = _yahoo_errors()
+        detail = next(iter(errs.values()), "") if errs else ""
+        raise DataUnavailable(
+            "Yahoo Finance returned no prices for any symbol "
+            f"({start_s} to {_to_date(end)}). This is usually a temporary "
+            "rate limit on the hosting server; wait a minute and run again."
+            + (f" Yahoo said: {str(detail)[:200]}" if detail else ""))
+    return closes
 
 
-# ======================================================= date-range tool body
-def _range_body(key, title, names, p, views, price_fmt, unit_note):
-    fetch = live_range_stats if p["live"] else cached_range_stats
-    with st.spinner(f"Fetching {len(names)} symbols..."):
-        try:
-            df = fetch(names, p["start"], p["end"], version=core.CALC_VERSION)
-        except core.DataUnavailable as e:      # not cached: next click retries
-            st.error(str(e))
-            return
-    if p["live"]:
-        st.caption(f"🔴 Live · refreshes every {LIVE_EVERY}s · last update "
-                   f"{datetime.now(IST):%H:%M:%S} IST")
-    if unit_note:
-        st.info(unit_note, icon="ℹ️")
-    show_range_results(df, key, title, p, views, price_fmt)
+def base_window(closes, start, include_start=True):
+    """Closes from the base close to the end.
 
+    include_start=True  -> base = close ON `start` (or the last trading day
+                           before it). Used by the 30/60/90-day rankings.
+    include_start=False -> base = close of the last trading day BEFORE
+                           `start`, so the start day's own move is counted.
+                           Used wherever the user picks a start date.
 
-def show_range_results(df, key, title, p, views, price_fmt="%.2f", source="Yahoo Finance",
-                       name_fmt=None):
-    """Summary line, metrics, chart, table and downloads for a range_stats frame."""
-    v = df.dropna(subset=["Gain (%)"])
-    req_start, req_end = pd.Timestamp(p["start"]).date(), pd.Timestamp(p["end"]).date()
-    if v.empty:
-        st.warning(f"{source} has no closing prices between {req_start:%a %d-%b-%Y} "
-                   f"and {req_end:%a %d-%b-%Y} yet (market holiday/weekend, or the day's "
-                   "data is not published yet). Try again later or pick an earlier date.")
+    Falls back to the first available close for symbols with no earlier data
+    (new listings)."""
+    s = closes.dropna()
+    start = pd.Timestamp(start).normalize()
+    if include_start:
+        base, after = s[s.index <= start], s[s.index > start]
     else:
-        b, l = v["Base Date"].mode().iloc[0], v["Last Date"].mode().iloc[0]
-        st.markdown(f"**Gain measured from close of {b:%a %d-%b-%Y} → close of "
-                    f"{l:%a %d-%b-%Y}** (base = last trading day before your start date "
-                    f"{req_start:%d-%b-%Y})")
-        if l < req_end and req_end.weekday() < 5:
-            st.caption(f"⚠️ Latest close available from {source} is {l:%a %d-%b}; "
-                       f"no data yet for {req_end:%a %d-%b}.")
-    summary_metrics(df, name_fmt=name_fmt)
-
-    view = (st.radio("Chart", list(views), horizontal=True, key=f"{key}_view")
-            if len(views) > 1 else next(iter(views)))
-    start, end = pd.Timestamp(p["start"]), pd.Timestamp(p["end"])
-    fig = views[view](df, f"{title}: {start:%d-%m-%Y} to {end:%d-%m-%Y}")
-    if fig is None:
-        st.warning("No valid data for this range.")
-    else:
-        show_fig(fig)
-
-    st.dataframe(df, width="stretch", hide_index=True,
-                 column_config=column_config(df, price_fmt))
-    st.caption("Gain = close on the end date vs the close of the trading day "
-               "BEFORE the start date, so the start day's move is included. Check "
-               "Base Date / Last Date in the table. Volatility is "
-               "annualised from daily returns. Max drawdown = worst fall from a "
-               "peak inside the range.")
-    download_buttons(df, f"{key}_{p['start']}_{p['end']}", key)
-    missing_note(df, "Gain (%)")
+        base, after = s[s.index < start], s[s.index >= start]
+    return pd.concat([base.iloc[-1:], after]) if len(base) else after
 
 
-_range_static = st.fragment(_range_body)
-_range_live = st.fragment(run_every=LIVE_EVERY)(_range_body)
+def period_gain(closes):
+    """% change from first to last available close in a series."""
+    s = closes.dropna()
+    if len(s) < 2 or s.iloc[0] == 0:
+        return np.nan
+    return (s.iloc[-1] / s.iloc[0] - 1) * 100
 
 
-def range_tool(key, title, names, views, button,
-               price_fmt="%.2f", unit_note=None, extra=None):
-    """Generic 'performance between two dates' page."""
-    st.header(title)
-    if extra:
-        st.caption(extra)
-    c1, c2, c3 = st.columns([1, 1, 1])
-    start = c1.date_input("Start", today_ist(), key=f"{key}_start")
-    end = c2.date_input("End", today_ist(), key=f"{key}_end")
-    c3.write("")
-    live = c3.toggle("Live auto-refresh", False, key=f"{key}_live",
-                     help=f"Re-fetches every {LIVE_EVERY}s. Only used when the end date is today.")
-    if st.button(button, type="primary", key=f"{key}_go") and valid_range(start, end):
-        st.session_state[key] = {"start": str(start), "end": str(end),
-                                 "live": bool(live and end >= today_ist())}
-    p = st.session_state.get(key)
-    if p:
-        (_range_live if p["live"] else _range_static)(
-            key, title, names, p, views, price_fmt, unit_note)
+RANGE_COLUMNS = ["Name", "Symbol", "Gain (%)", "Base Date", "Base Price", "Last Date",
+                 "Last Price", "Range High", "Range Low", "Off High (%)",
+                 "Max Drawdown (%)", "Volatility (%)", "Up Days (%)"]
 
 
-# ================================================== 30/60/90-day ranking body
-@st.fragment
-def _ranking_body(key, title, names, chart_title):
-    with st.spinner(f"Pulling 30/60/90-day returns for {len(names)} symbols..."):
+def range_stats(names, start, end):
+    """Performance of each symbol from `start` to `end` (inclusive), sorted
+    best -> worst, missing symbols last.
+
+    Base price = close of the last trading day BEFORE the start date, so the
+    start day's own move is included. E.g. start 30-Oct / end 30-Oct gives the
+    30th's one-day move (close 29 -> close 30); start Mon 2-Nov uses Friday
+    30-Oct's close. Falls back to the first close on/after `start` for
+    symbols listed later.
+    Extra columns: range high/low, distance from the high, max drawdown,
+    annualised volatility and % of up days."""
+    start_ts = pd.Timestamp(start).normalize()
+    closes = download_closes(list(names), start_ts - timedelta(days=14), end)
+    return stats_from_closes(closes, names, start_ts)
+
+
+def stats_from_closes(closes, names, start):
+    """range_stats() maths on an already-downloaded close table
+    (rows = dates, columns = keys of `names`). Shared by Yahoo and NSE tools."""
+    start_ts = pd.Timestamp(start).normalize()
+    rows = []
+    for sym, nm in names.items():
+        w = base_window(closes[sym], start_ts, include_start=False)
+        if len(w) < 2 or w.index[-1] < start_ts:
+            rows.append({"Name": nm, "Symbol": sym})
+            continue
+        r = w.pct_change().dropna()
+        rows.append({
+            "Name": nm, "Symbol": sym,
+            "Gain (%)": (w.iloc[-1] / w.iloc[0] - 1) * 100,
+            "Base Date": w.index[0].date(), "Base Price": w.iloc[0],
+            "Last Date": w.index[-1].date(), "Last Price": w.iloc[-1],
+            "Range High": w.max(), "Range Low": w.min(),
+            "Off High (%)": (w.iloc[-1] / w.max() - 1) * 100,
+            "Max Drawdown (%)": (w / w.cummax() - 1).min() * 100,
+            "Volatility (%)": r.std() * np.sqrt(252) * 100 if len(r) > 1 else np.nan,
+            "Up Days (%)": (r > 0).mean() * 100,
+        })
+    df = pd.DataFrame(rows).reindex(columns=RANGE_COLUMNS)
+    pct = [c for c in df.columns if c.endswith("(%)")]
+    df[pct] = df[pct].astype(float).round(2)
+    return df.sort_values("Gain (%)", ascending=False,
+                          na_position="last").reset_index(drop=True)
+
+
+# ------------------------------------------------- NSE all-indices (EOD file)
+# NSE publishes one CSV per trading day with the close of EVERY NSE index
+# (sectoral, thematic, strategy, broad market, bond). Yahoo only carries a
+# handful of them, so this tool reads NSE's own file instead.
+NSE_INDEX_URLS = [
+    "https://nsearchives.nseindia.com/content/indices/ind_close_all_{}.csv",
+    "https://archives.nseindia.com/content/indices/ind_close_all_{}.csv",   # mirror
+]
+NSE_HEADERS = {
+    "User-Agent": ("Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 "
+                   "(KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36"),
+    "Accept": "text/csv,*/*", "Accept-Language": "en-US,en;q=0.9",
+    "Referer": "https://www.nseindia.com/all-reports",
+}
+NSE_MAX_FULL_DAYS = 100      # longer ranges: fetch only the two end points
+_NSE_DAY_CACHE = {}          # date -> (fetched_at, DataFrame | None)
+_NSE_NUM_COLS = {"Open Index Value": "Open", "High Index Value": "High",
+                 "Low Index Value": "Low", "Closing Index Value": "Close",
+                 "Change(%)": "Day Chg (%)", "P/E": "P/E", "P/B": "P/B",
+                 "Div Yield": "Div Yield"}
+
+NSE_CATEGORIES = ["Sectoral", "Thematic", "Strategy", "Broad market", "Bond / G-Sec", "Volatility"]
+_SECTOR_WORDS = re.compile(
+    r"\b(auto|bank|financial services|fmcg|it|media|metal|pharma|realty|healthcare|"
+    r"consumer durables|oil (?:&|and) gas|chemicals|it & telecom)\b", re.I)
+_BOND_WORDS = re.compile(r"g-?sec|sdl|bond|t-?bill|gilt|\bcorporate\b|\baaa\b|1d rate|"
+                         r"\bgsec\b|\byr\b|\byear\b|money market|overnight", re.I)
+_STRATEGY_WORDS = re.compile(
+    r"alpha|beta|quality|value|momentum|low[ -]?vol|equal weight|dividend|growth|"
+    r"multi.?factor|\bfactor\b|shariah|top \d+|\btri\b|leverage|inverse|arbitrage|"
+    r"\bmq\b|\bqvlv\b|liquid \d+", re.I)
+_BROAD_WORDS = re.compile(
+    r"^nifty ?(50|next 50|100|200|500|midcap|smallcap|microcap|total market|"
+    r"largemidcap|midsmallcap|mid ?small|large ?mid|india 500)|^nifty(100|200|500)?$|"
+    r"midcap|smallcap|microcap|total market", re.I)
+
+
+def nse_category(name):
+    n = str(name)
+    if "vix" in n.lower():
+        return "Volatility"
+    if _BOND_WORDS.search(n):
+        return "Bond / G-Sec"
+    if _STRATEGY_WORDS.search(n):
+        return "Strategy"
+    if _SECTOR_WORDS.search(n) and not re.search(r"midcap|smallcap|next 50", n, re.I) \
+            or re.search(r"midsmall (healthcare|financial services|it & telecom)", n, re.I):
+        return "Sectoral"
+    if _BROAD_WORDS.search(n):
+        return "Broad market"
+    return "Thematic"
+
+
+def _parse_nse_csv(text):
+    # index_col=False: a row with a stray extra field must not shift columns
+    df = pd.read_csv(io.StringIO(text.lstrip("\ufeff")), index_col=False)
+    df.columns = [str(c).strip() for c in df.columns]
+    if "Index Name" not in df.columns or "Closing Index Value" not in df.columns:
+        raise ValueError("unexpected file format")
+    df["Index Name"] = df["Index Name"].astype(str).str.strip()
+    df = df[df["Index Name"].ne("") & df["Index Name"].ne("nan")]
+    out = pd.DataFrame(index=pd.Index(df["Index Name"], name="Index Name"))
+    for src, dst in _NSE_NUM_COLS.items():
+        if src in df.columns:
+            out[dst] = pd.to_numeric(df[src].astype(str).str.replace(",", "").str.strip(),
+                                     errors="coerce").to_numpy()
+    return out[~out.index.duplicated()]
+
+
+def nse_index_day(day, session=None):
+    """All NSE indices for one trading day: DataFrame indexed by index name,
+    None when NSE has no file for that day (holiday, or not published yet).
+    Raises ConnectionError if NSE could not be reached / refused us."""
+    import requests
+    day = pd.Timestamp(day).normalize()
+    now = time.time()
+    hit = _NSE_DAY_CACHE.get(day)
+    if hit is not None:
+        fetched_at, df = hit
+        old_day = (pd.Timestamp(_naive_utc_now()).normalize() - day).days > 4
+        if df is not None or old_day or now - fetched_at < 600:
+            return df
+    if day.weekday() >= 5:                       # weekend: no file, no request
+        _NSE_DAY_CACHE[day] = (now, None)
+        return None
+    http = session or requests
+    last_err = None
+    for url in NSE_INDEX_URLS:
         try:
-            df = cached_index_returns(names, str(today_ist()), version=core.CALC_VERSION)
-        except Exception as e:
-            st.error(f"Error: {e}")
-            return
-    show_ranking_results(df, key, chart_title)
+            r = http.get(url.format(day.strftime("%d%m%Y")), headers=NSE_HEADERS, timeout=20)
+        except Exception as e:                   # network error: try the mirror
+            last_err = e
+            continue
+        if r.status_code == 404:
+            _NSE_DAY_CACHE[day] = (now, None)
+            return None
+        if r.status_code == 200 and "Index Name" in r.text[:200]:
+            df = _parse_nse_csv(r.text)
+            _NSE_DAY_CACHE[day] = (now, df)
+            return df
+        last_err = f"HTTP {r.status_code}"
+    raise ConnectionError(f"NSE archives unreachable ({last_err})")
 
 
-def show_ranking_results(df, key, chart_title, name_fmt=None, index=True):
-    """Metrics, strongest/weakest chart, table and downloads for a ranked frame."""
-    ok = df.dropna(subset=["Sum of Ranks"])
-    if not ok.empty:
-        okn = name_fmt(ok) if name_fmt else ok
-        m = st.columns(4)
-        m[0].metric("Ranked", len(ok))
-        m[1].metric("Strongest", okn.iloc[0]["Name"], f"{ok.iloc[0]['30D %']:.2f}% (30D)")
-        m[2].metric("Weakest", okn.iloc[-1]["Name"], f"{ok.iloc[-1]['30D %']:.2f}% (30D)")
-        m[3].metric("Positive over 90D", f"{int((ok['90D %'] > 0).sum())} / {len(ok)}")
-
-    c1, c2 = st.columns([2, 1])
-    which = c1.radio("Chart", ["Strongest", "Weakest"], horizontal=True, key=f"{key}_which",
-                     help="Ranked by the sum of 30/60/90-day return ranks (lower = stronger)")
-    n = c2.slider("How many", 3, 10, 3, key=f"{key}_n")
-    fig = core.plot_index_returns(name_fmt(df) if name_fmt else df, which.lower(), n=n,
-                                  title_prefix=f"{chart_title}: ")
-    if fig is None:
-        st.warning("No symbol returned complete data.")
-    else:
-        show_fig(fig)
-    st.dataframe(df, width="stretch", hide_index=not index, column_config=column_config(df))
-    st.caption("30D % = latest close vs the close 30 days ago (or the last trading "
-               "day before that, if it was a holiday); same for 60D and 90D. "
-               "Rank 1 = best return in that window. 'Off 90D High' = how far the "
-               "last close is below the highest close of the last 90 days.")
-    download_buttons(df, f"{key}_{today_ist()}", key, index=index)
-    missing_note(df, "Sum of Ranks")
+def _nse_walk_back(day, limit=12, session=None):
+    """(date, frame) of the latest trading day on or before `day`."""
+    day = pd.Timestamp(day).normalize()
+    for back in range(limit):
+        d = day - timedelta(days=back)
+        df = nse_index_day(d, session)
+        if df is not None:
+            return d, df
+    return None, None
 
 
-def ranking_tool(key, title, names, chart_title=None, show_header=True):
-    if show_header:
-        st.header(title)
-    if st.button("Run analysis", type="primary", key=f"{key}_go"):
-        st.session_state[key] = names
-    if st.session_state.get(key) is not None:
-        _ranking_body(key, title, st.session_state[key], chart_title or title)
+def nse_index_stats(start, end, max_full_days=NSE_MAX_FULL_DAYS, workers=6):
+    """range_stats() for EVERY NSE index, from NSE's daily all-indices file.
 
+    Same base rule as the other tools: base = close of the last trading day
+    before `start`. Ranges longer than `max_full_days` weekdays fetch only the
+    base and end days (gain is exact; range high/low, drawdown and volatility
+    are left blank). Adds Category and the latest P/E, P/B and dividend yield."""
+    import requests
+    from concurrent.futures import ThreadPoolExecutor
+    start_ts, end_ts = pd.Timestamp(start).normalize(), pd.Timestamp(end).normalize()
+    session = requests.Session()
+    try:
+        base_day, base_df = _nse_walk_back(start_ts - timedelta(days=1), session=session)
+        days = [d for d in pd.bdate_range(start_ts, end_ts)]
+        quick = len(days) > max_full_days
+        frames = {}
+        if base_df is not None:
+            frames[base_day] = base_df
+        if quick:
+            d, df = _nse_walk_back(end_ts, session=session)
+            if df is not None and d >= start_ts:
+                frames[d] = df
+        else:
+            with ThreadPoolExecutor(max_workers=workers) as ex:
+                for d, df in zip(days, ex.map(lambda d: nse_index_day(d, session), days)):
+                    if df is not None:
+                        frames[d] = df
+    except ConnectionError as e:
+        raise DataUnavailable(
+            "Could not download NSE's index file from nsearchives.nseindia.com "
+            f"({e}). NSE sometimes blocks cloud servers for a few minutes; "
+            "wait a minute and run again.") from None
+    finally:
+        session.close()
 
-# ============================================== NSE all-indices (NSE EOD file)
-@st.cache_data(ttl=600, show_spinner=False)
-def cached_nse_stats(start: str, end: str, version: int = core.CALC_VERSION):
-    return core.nse_index_stats(start, end)
-
-
-def _short_names(df):
-    """'Nifty Financial Services 25/50' -> 'Financial Services 25/50' for charts."""
-    d = df.copy()
-    d["Name"] = d["Name"].str.replace(r"^Nifty\s*", "", regex=True).str.strip().replace("", "Nifty")
-    return d
-
-
-def page_nse_all():
-    key, title = "nseall", "NSE Indices (All, Date Range)"
-    st.header(title)
-    st.caption("Every NSE index: sectoral, thematic, strategy and broad market, from "
-               "NSE's own end-of-day file (nsearchives.nseindia.com), not Yahoo. "
-               "Data for a day appears after NSE publishes it in the evening.")
-    c1, c2, c3 = st.columns([1, 1, 2])
-    start = c1.date_input("Start", today_ist(), key=f"{key}_start")
-    end = c2.date_input("End", today_ist(), key=f"{key}_end")
-    cats = c3.multiselect("Categories", core.NSE_CATEGORIES, ["Sectoral"], key=f"{key}_cats",
-                          help="Leave empty to show every index")
-    if st.button("Run NSE indices scan", type="primary", key=f"{key}_go") and valid_range(start, end):
-        st.session_state[key] = {"start": str(start), "end": str(end), "live": False}
-    p = st.session_state.get(key)
-    if not p:
-        return
-    with st.spinner("Downloading NSE index files..."):
-        try:
-            df, quick = cached_nse_stats(p["start"], p["end"], version=core.CALC_VERSION)
-        except core.DataUnavailable as e:          # not cached: next click retries
-            st.error(str(e))
-            return
+    if not frames:
+        return pd.DataFrame(columns=RANGE_COLUMNS + ["Category", "P/E", "P/B", "Div Yield"]), quick
+    closes = pd.DataFrame({d: f["Close"] for d, f in sorted(frames.items())}).T
+    closes.index = pd.DatetimeIndex(closes.index)
+    names = {c: c for c in closes.columns}
+    out = stats_from_closes(closes, names, start_ts)
     if quick:
-        st.info(f"Long range (over {core.NSE_MAX_FULL_DAYS} trading days): gains use the "
-                "base and end closes only, so range high/low, drawdown and volatility are "
-                "left blank. Use a shorter range for those.", icon="ℹ️")
-    shown = df[df["Category"].isin(cats)] if cats else df
-    shown = shown.reset_index(drop=True)
-
-    if len(cats) != 1 and not shown.dropna(subset=["Gain (%)"]).empty:
-        by = (shown.dropna(subset=["Gain (%)"]).groupby("Category")["Gain (%)"]
-                   .agg(["count", "median", "max", "min"]).round(2)
-                   .rename(columns={"count": "Indices", "median": "Median gain (%)",
-                                    "max": "Best (%)", "min": "Worst (%)"})
-                   .sort_values("Median gain (%)", ascending=False))
-        with st.expander("By category", expanded=True):
-            st.dataframe(by, width="stretch")
-
-    views = {"Heatmap": lambda d, t: core.plot_gain_grid(_short_names(d), t),
-             "Ranked bars": lambda d, t: core.plot_gain_bars(_short_names(d), t)}
-    show_range_results(shown, key, f"NSE {', '.join(cats) or 'all'} indices", p, views,
-                       source="NSE", name_fmt=_short_names)
+        out[["Range High", "Range Low", "Off High (%)", "Max Drawdown (%)",
+             "Volatility (%)", "Up Days (%)"]] = np.nan
+    latest = frames[max(frames)]
+    out["Category"] = [nse_category(n) for n in out["Name"]]
+    for c in ("P/E", "P/B", "Div Yield"):
+        out[c] = out["Name"].map(latest[c]) if c in latest else np.nan
+    out = out.drop(columns=["Symbol"]).rename(columns={"Base Price": "Base Value",
+                                                       "Last Price": "Last Value"})
+    out = out[["Name", "Category"] + [c for c in out.columns if c not in ("Name", "Category")]]
+    return out, quick
 
 
-# ===================================================================== pages
-def page_home():
-    st.title("Analysis Dashboard")
-    st.caption("Pick a tool from the sidebar.")
-    st.dataframe(pd.DataFrame([
-        ("🇮🇳 Nifty 50 Performance", "All 50 stocks over any date range — heatmap or ranked bars, with drawdown and volatility"),
-        ("🇮🇳 NSE Indices (All, Date Range)", "Every NSE sectoral, thematic, strategy and broad-market index over any date range, from NSE's own data"),
-        ("🇮🇳 NSE Sector Indices", "Every NSE sectoral index ranked on 30/60/90-day returns, from NSE's own data (thematic/strategy/broad optional)"),
-        ("🇮🇳 Stock List Ranking", "Upload any CSV of symbols (Nifty Infra, Media, your watchlist…) and rank them on 30/60/90-day returns"),
-        ("🌍 World Indices", "20 global indices ranked on 30/60/90-day returns"),
-        ("🌍 Global Indices (Date Range)", "20 global indices over a date range you choose"),
-        ("🌍 Country ETFs (USA)", "44 US-listed single-country ETFs ranked on 30/60/90-day returns"),
-        ("🛢️ Commodities", "Gold, silver, oil, gas, base metals over a date range, with optional live refresh"),
-        ("💱 Currencies vs USD", "16 currencies' moves against the US dollar over a date range"),
-        ("📅 Seasonality", "Month-by-month return heatmap and win rates for any ticker"),
-        ("🕯️ Candlestick Chart", "OHLC chart with volume for any Yahoo ticker"),
-    ], columns=["Tool", "What it shows"]), hide_index=True, width="stretch")
+def nse_index_returns(reference_date=None, durations=(30, 60, 90), workers=6):
+    """Unranked 30/60/90-day returns for EVERY NSE index from NSE's daily file
+    (rank with rank_returns() after filtering). Downloads each weekday in the
+    90-day window (cached per day) so 'Off 90D High' is exact.
+    Returns (DataFrame, latest_trading_day)."""
+    import requests
+    from concurrent.futures import ThreadPoolExecutor
+    durations = list(durations)
+    ref = pd.Timestamp(reference_date or _naive_utc_now()).normalize()
+    days = list(pd.bdate_range(ref - timedelta(days=max(durations) + 14), ref))
+    session = requests.Session()
+    try:
+        with ThreadPoolExecutor(max_workers=workers) as ex:
+            frames = {d: f for d, f in zip(days, ex.map(lambda d: nse_index_day(d, session), days))
+                      if f is not None}
+    except ConnectionError as e:
+        raise DataUnavailable(
+            "Could not download NSE's index file from nsearchives.nseindia.com "
+            f"({e}). NSE sometimes blocks cloud servers for a few minutes; "
+            "wait a minute and run again.") from None
+    finally:
+        session.close()
+    if not frames:
+        raise DataUnavailable("NSE returned no index files for the last "
+                              f"{max(durations)} days; try again later.")
+    closes = pd.DataFrame({d: f["Close"] for d, f in sorted(frames.items())}).T
+    closes.index = pd.DatetimeIndex(closes.index)
+    latest_day = max(frames)
+    df = window_returns(closes, ref, durations)
+    df = df.rename(columns={"Last Price": "Last Value"})
+    df.insert(0, "Name", df.index)
+    df.insert(1, "Category", [nse_category(n) for n in df.index])
+    latest = frames[latest_day]
+    for c in ("P/E", "P/B", "Div Yield"):
+        df[c] = df["Name"].map(latest[c]) if c in latest else np.nan
+    df.index.name = "Index"
+    return df, latest_day.date()
 
 
-def page_nifty50():
-    names = {s: s[:-3] for s in core.nifty50_symbols()}
-    range_tool("nifty50", "Nifty 50 Performance", names,
-               {"Heatmap": core.plot_gain_grid, "Ranked bars": core.plot_gain_bars},
-               "Run Nifty 50 scan")
+def range_gains(names, start, end):
+    """[Name, Gain (%)] only (used by the Flask routes)."""
+    return range_stats(names, start, end)[["Name", "Gain (%)"]]
 
 
-@st.cache_data(ttl=600, show_spinner=False)
-def cached_nse_returns(today: str, version: int = core.CALC_VERSION):
-    return core.nse_index_returns(today)
+def get_valid_date(symbol, date_str, max_back=10):
+    """Latest trading day on/before date_str. Returns None after `max_back`
+    days instead of looping forever on a delisted symbol (old behaviour)."""
+    date = datetime.strptime(date_str, '%Y-%m-%d')
+    for _ in range(max_back):
+        data = download_ohlc(symbol, date, date)
+        if not data.empty:
+            return date.strftime('%Y-%m-%d')
+        date -= timedelta(days=1)
+    return None
 
 
-def page_nse():
-    key = "nse"
-    st.header("NSE Sector Indices")
-    st.caption("Every NSE sectoral index (and, if you choose, thematic, strategy and "
-               "broad-market indices) ranked on 30/60/90-day returns, from NSE's own "
-               "end-of-day file. Today's close appears after NSE publishes it in the evening.")
-    c1, c2 = st.columns([3, 1])
-    cats = c1.multiselect("Categories", core.NSE_CATEGORIES, ["Sectoral"], key=f"{key}_cats",
-                          help="Ranks are worked out within the categories you pick. "
-                               "Leave empty for every index.")
-    c2.write("")
-    if c2.button("Run analysis", type="primary", key=f"{key}_go", width="stretch"):
-        st.session_state[key] = True
-    if not st.session_state.get(key):
-        return
-    with st.spinner("Downloading 90 days of NSE index files (first run takes a few seconds)..."):
-        try:
-            raw, last_day = cached_nse_returns(str(today_ist()), version=core.CALC_VERSION)
-        except core.DataUnavailable as e:          # not cached: next click retries
-            st.error(str(e))
-            return
-    shown = raw[raw["Category"].isin(cats)] if cats else raw
-    if shown.empty:
-        st.warning("No indices in the selected categories.")
-        return
-    df = core.rank_returns(shown)
-    st.markdown(f"**Returns up to the close of {pd.Timestamp(last_day):%a %d-%b-%Y}** "
-                f"· {len(df)} indices · {', '.join(cats) or 'all categories'}")
-    if last_day < today_ist() and today_ist().weekday() < 5:
-        st.caption(f"⚠️ NSE has not published {today_ist():%a %d-%b} yet "
-                   "(holiday, or before the evening update).")
-    show_ranking_results(df.reset_index(drop=True), key, "NSE " + (", ".join(cats) or "all"),
-                         name_fmt=_short_names, index=False)
+def get_custom_date_range_gain(symbol, start_date, end_date):
+    """Kept for backward compatibility. end_date is EXCLUSIVE (yfinance style).
+    Same base rule as range_stats (last close before start_date)."""
+    end_incl = pd.Timestamp(end_date) - timedelta(days=1)
+    data = download_ohlc(symbol, pd.Timestamp(start_date) - timedelta(days=14), end_incl)
+    return np.nan if data.empty else period_gain(base_window(data["Close"], start_date, include_start=False))
 
 
-def page_world():
-    ranking_tool("world", "World Indices", core.WORLD_INDICES, "World Indices")
+# ------------------------------------------------------- 30/60/90-day ranking
+def compute_index_returns(names, durations=(30, 60, 90), reference_date=None):
+    """Returns over each look-back window, ranked (rank 1 = best return).
+    Rows sorted by Sum of Ranks ascending (strongest first); symbols with
+    missing data are appended at the bottom."""
+    durations = list(durations)
+    ref = pd.Timestamp(reference_date or _naive_utc_now()).normalize()
+    # 14 extra days so the base close exists even after long holidays
+    closes = download_closes(list(names), ref - timedelta(days=max(durations) + 14), ref)
+
+    df = window_returns(closes, ref, durations).drop(columns=["Last Date"])
+    df.insert(0, "Name", [names[s] for s in df.index])
+    df.index.name = "Symbol"
+    return rank_returns(df, durations)
 
 
-def page_custom():
-    range_tool("custom", "Global Indices (Date Range)", core.WORLD_INDICES,
-               {"Bars": core.plot_gain_bars},
-               "Compare indices",
-               unit_note="Returns are in each index's local currency.")
+def window_returns(closes, ref, durations=(30, 60, 90)):
+    """Unranked 30/60/90-day returns for every column of a close table.
+    Base for each window = close on (ref - d days), or the last trading day
+    before it. Columns: d D %, Last Price, Off <max>D High %."""
+    ref = pd.Timestamp(ref).normalize()
+    hi_col = f"Off {max(durations)}D High %"
+    rows = {}
+    for col in closes.columns:
+        s = closes[col].dropna()
+        s = s[s.index < ref + timedelta(days=1)]
+        row = {f"{d}D %": period_gain(base_window(s, ref - timedelta(days=d)))
+               for d in durations}
+        win = base_window(s, ref - timedelta(days=max(durations)))
+        row["Last Price"] = win.iloc[-1] if len(win) else np.nan
+        row["Last Date"] = win.index[-1].date() if len(win) else None
+        row[hi_col] = (win.iloc[-1] / win.max() - 1) * 100 if len(win) else np.nan
+        rows[col] = row
+    return pd.DataFrame.from_dict(rows, orient="index")
 
 
-def page_etfs():
-    ranking_tool("etfs", "Country ETFs (USA)", core.COUNTRY_ETFS, "Country ETFs")
-    st.caption("US-listed ETFs priced in USD, so returns include the currency move "
-               "against the dollar.")
+def rank_returns(df, durations=(30, 60, 90)):
+    """Rank each window (1 = best), add Sum of Ranks, sort strongest first;
+    rows with a missing window go to the bottom. Ranks are relative to the
+    rows passed in, so filter BEFORE ranking."""
+    durations = list(durations)
+    hi_col = f"Off {max(durations)}D High %"
+    ret_cols = [f"{d}D %" for d in durations]
+    df = df.drop(columns=[c for c in df.columns if c.startswith("Rank") or c == "Sum of Ranks"])
+
+    ok = df.dropna(subset=ret_cols).copy()          # .copy(): no SettingWithCopy
+    bad = df[df[ret_cols].isna().any(axis=1)]
+    for c in ret_cols:
+        ok[f"Rank {c.replace(' %', '')}"] = ok[c].rank(ascending=False, method="min")
+    rank_cols = [c for c in ok.columns if c.startswith("Rank")]
+    ok["Sum of Ranks"] = ok[rank_cols].sum(axis=1)
+    ok = ok.sort_values("Sum of Ranks", kind="stable")
+
+    out = pd.concat([ok, bad]) if not bad.empty else ok
+    out[ret_cols + [hi_col]] = out[ret_cols + [hi_col]].round(2)
+    order = (["Name", "Category"] + ret_cols + [c for c in out.columns if c.startswith("Rank")]
+             + ["Sum of Ranks", "Last Price", "Last Value", hi_col])
+    extra = [c for c in out.columns if c not in order]
+    out = out[[c for c in order if c in out.columns] + extra]
+    return out
 
 
-def page_commodities():
-    range_tool("commod", "Commodities", core.COMMODITIES,
-               {"Bars": core.plot_gain_bars},
-               "Compare commodities",
-               extra="Front-month futures on US/LME-linked exchanges, priced in USD.",
-               unit_note="Futures roll each month, so a long range can include "
-                         "small jumps at contract roll dates.")
+def plot_index_returns(df, which="strongest", n=3, title_prefix=""):
+    """Grouped bar chart of the n strongest (lowest Sum of Ranks) or weakest
+    indices. Returns a Figure, or None if no index has complete data."""
+    ranked = df.dropna(subset=["Sum of Ranks"]) if "Sum of Ranks" in df else df.iloc[0:0]
+    if ranked.empty:
+        return None
+    pick = ranked.head(n) if which == "strongest" else ranked.tail(n).iloc[::-1]
+    ret_cols = [c for c in df.columns if c.endswith("D %") and not c.startswith("Off")]
+
+    fig, ax = plt.subplots(figsize=(max(10, 2.4 * len(pick)), 7))
+    width = 0.8 / len(ret_cols)
+    x = np.arange(len(pick))
+    for i, c in enumerate(ret_cols):
+        vals = pick[c].to_numpy(float)
+        ax.bar(x + i * width, vals, width, label=f"{c[:-3]} days")
+        for xi, v in zip(x, vals):
+            ax.text(xi + i * width, v, f"{v:.1f}%" if len(pick) > 3 else f"{v:.2f}%",
+                    ha="center", va="bottom" if v >= 0 else "top",
+                    fontsize=11 if len(pick) <= 3 else 8)
+    ax.axhline(0, color="grey", linewidth=0.8)
+    ax.set_xticks(x + width * (len(ret_cols) - 1) / 2)
+    ax.set_xticklabels(pick["Name"], fontsize=13, rotation=30, ha="right")
+    ax.set_ylabel("Return (%)", fontsize=13)
+    ax.set_title(f"{title_prefix}{which.title()} {len(pick)} by sum of 30/60/90-day ranks",
+                 fontsize=16)
+    ax.legend(title="Window")
+    fig.tight_layout()
+    return fig
 
 
-def page_currencies():
-    range_tool("fx", "Currencies vs USD", core.CURRENCIES,
-               {"Bars": core.plot_gain_bars},
-               "Compare currencies", price_fmt="%.6f",
-               unit_note="Positive = the currency strengthened against the US dollar; "
-                         "negative = it weakened. Price column = USD per 1 unit.")
+# ---------------------------------------------------------------- seasonality
+def seasonality_tables(ticker, years, include_partial=False):
+    """Returns (heatmap_df [Year x Jan..Dec], summary_df, n_years).
+    Raises ValueError if there is not enough data."""
+    end = _naive_utc_now()
+    start = end - timedelta(days=int(years) * 366 + 62)   # extra months: first return
+    data = download_ohlc(ticker, start, end, interval="1mo")
+    if data.empty:
+        raise ValueError(f"No monthly data for {ticker}")
+
+    # Yahoo sometimes adds an extra mid-month row for the latest price:
+    # collapse to one close per calendar month.
+    close = data["Close"].groupby(data.index.to_period("M")).last()
+    rets = close.pct_change().dropna()
+    if not include_partial and len(rets) and rets.index[-1] == pd.Period(end, "M"):
+        rets = rets.iloc[:-1]                               # month not finished yet
+    rets = rets[rets.index >= pd.Period(end, "M") - 12 * int(years)]
+    if rets.empty:
+        raise ValueError("Not enough history.")
+
+    frame = pd.DataFrame({"Year": rets.index.year, "Month": rets.index.month,
+                          "Ret": rets.to_numpy()})
+    heat = (frame.pivot_table(index="Year", columns="Month", values="Ret")
+                 .reindex(columns=range(1, 13)))            # always 12 columns
+    heat.columns = MONTHS
+
+    g = frame.groupby("Month")["Ret"]
+    summary = pd.DataFrame({
+        "Month": MONTHS,
+        "Positive": g.apply(lambda r: int((r > 0).sum())).reindex(range(1, 13)).fillna(0).astype(int).to_numpy(),
+        "Negative": g.apply(lambda r: int((r < 0).sum())).reindex(range(1, 13)).fillna(0).astype(int).to_numpy(),
+        "Avg Return": g.mean().reindex(range(1, 13)).to_numpy(),
+        "Avg Positive Return": frame[frame.Ret > 0].groupby("Month")["Ret"].mean().reindex(range(1, 13)).to_numpy(),
+        "Geo Mean Return": g.apply(lambda r: np.prod(1 + r) ** (1 / len(r)) - 1).reindex(range(1, 13)).to_numpy(),
+    })
+    total = summary["Positive"] + summary["Negative"]
+    summary.insert(3, "Win Rate", np.where(total > 0, summary["Positive"] / total.replace(0, 1), np.nan))
+    return heat, summary, int(frame["Year"].nunique())
 
 
-def page_stock_list():
-    st.header("Stock List Ranking")
-    st.caption("Upload an NSE index constituent CSV (from niftyindices.com) or any CSV "
-               "with a 'Symbol' column. Without an upload, the Nifty 50 list is used.")
-    c1, c2 = st.columns([3, 1])
-    up = c1.file_uploader("Symbols CSV", type="csv", key="list_file")
-    suffix = c2.selectbox("Exchange", [".NS (NSE)", ".BO (BSE)", "None (US / other)"],
-                          key="list_suffix")
-    suffix = {".NS (NSE)": ".NS", ".BO (BSE)": ".BO"}.get(suffix, "")
-    label = c2.text_input("Chart title", "Stocks", key="list_title")
+def plot_seasonality(heat, ticker, n_years):
+    colors = ["#C71585", "#DB7093", "#FFFFFF", "#228B22", "#006400"]
+    cmap = LinearSegmentedColormap.from_list("dark_cmap", colors, N=256)
+    fig, ax = plt.subplots(figsize=(12, max(4, 0.45 * len(heat) + 2)))
+    sns.heatmap(heat, annot=True, fmt=".2%", cmap=cmap, center=0, ax=ax,
+                cbar_kws={"label": "Monthly return"})
+    # Labels come from the DataFrame columns, so they sit centred on the
+    # correct cells (old code put them on cell edges at 0..11).
+    span = f"{heat.index.min()}" if heat.index.min() == heat.index.max() \
+        else f"{heat.index.min()}-{heat.index.max()}"
+    ax.set_title(f"Monthly Seasonality of {ticker} ({span})")
+    ax.set_xlabel("Month")
+    ax.set_ylabel("Year")
+    ax.tick_params(axis="x", rotation=45)
+    ax.tick_params(axis="y", rotation=0)
+    fig.tight_layout()
+    return fig
 
-    if up is not None:
-        try:
-            names = core.symbols_from_csv(pd.read_csv(up), suffix)
-        except Exception as e:
-            st.error(f"Could not read the CSV: {e}")
-            return
-        if not names:
-            st.error("No symbols found in that file.")
-            return
-        st.success(f"{len(names)} symbols loaded from {up.name}"
-                   + (" (capped at 500)" if len(names) == 500 else ""))
+
+# --------------------------------------------------------------- other charts
+def plot_gain_bars(df, title, value_col="Gain (%)"):
+    """Bar chart for a [Name, Gain (%)] frame sorted best -> worst. Uses
+    horizontal bars when there are many items so names stay readable.
+    Returns None if nothing to plot."""
+    valid = df.dropna(subset=[value_col])
+    if valid.empty:
+        return None
+    names, gains = valid["Name"].tolist(), valid[value_col].to_numpy(float)
+    colors = ["#2e7d32" if g > 0 else "#c62828" for g in gains]
+    span = max(float(np.abs(gains).max()), 1e-9)
+
+    if len(valid) > 15:
+        fig, ax = plt.subplots(figsize=(12, 0.32 * len(valid) + 2))
+        y = np.arange(len(valid))
+        ax.barh(y, gains, color=colors)
+        ax.set_yticks(y)
+        ax.set_yticklabels(names, fontsize=9)
+        ax.invert_yaxis()                                  # best on top
+        for yi, g in zip(y, gains):
+            ax.text(g + (0.01 if g >= 0 else -0.01) * span, yi, f"{g:.2f}%",
+                    va="center", ha="left" if g >= 0 else "right", fontsize=8)
+        ax.axvline(0, color="grey", linewidth=0.8)
+        ax.set_xlabel(value_col)
+        ax.grid(axis="x", linestyle="--", alpha=0.5)
+        ax.set_xlim(min(0, gains.min()) - 0.15 * span, max(0, gains.max()) + 0.15 * span)
     else:
-        names = {s: s[:-3] for s in core.nifty50_symbols()}
-    with st.expander(f"Symbols ({len(names)})"):
-        st.write(", ".join(names))
-
-    # Re-run automatically if a different list is loaded
-    if st.session_state.get("list") is not None and st.session_state["list"] != names:
-        st.session_state["list"] = None
-    ranking_tool("list", "Stock List Ranking", names, label, show_header=False)
-
-
-def page_seasonality():
-    st.header("Monthly Seasonality Heatmap")
-    c1, c2, c3 = st.columns([2, 1, 1])
-    ticker = c1.text_input("Ticker", "RELIANCE.NS").strip().upper()
-    years = int(c2.number_input("Lookback (years)", 1, 50, 10))
-    c3.write("")
-    partial = c3.checkbox("Include current month", False,
-                          help="The current month is incomplete, so it is left out by default")
-    if st.button("Run seasonality", type="primary") and ticker:
-        with st.spinner("Downloading monthly history..."):
-            try:
-                heat, summary, n_years = cached_seasonality(ticker, years, partial)
-            except Exception as e:
-                st.error(str(e))
-                return
-        show_fig(core.plot_seasonality(heat, ticker, n_years))
-        ratio = st.column_config.NumberColumn(format="percent")
-        st.dataframe(summary, width="stretch", hide_index=True,
-                     column_config={c: ratio for c in summary.columns
-                                    if c not in ("Month", "Positive", "Negative")})
+        fig, ax = plt.subplots(figsize=(12, 7))
+        bars = ax.bar(names, gains, color=colors)
+        for b, g in zip(bars, gains):
+            ax.text(b.get_x() + b.get_width() / 2, g, f"{g:.2f}%", ha="center",
+                    va="bottom" if g >= 0 else "top", fontsize=10)
+        ax.axhline(0, color="grey", linewidth=0.8)
+        ax.set_ylabel(value_col)
+        plt.setp(ax.get_xticklabels(), rotation=45, ha="right")
+        ax.grid(axis="y", linestyle="--", alpha=0.6)
+    ax.set_title(title)
+    fig.tight_layout()
+    return fig
 
 
-def page_candle():
-    st.header("Candlestick Chart")
-    c1, c2, c3 = st.columns([2, 1, 1])
-    ticker = c1.text_input("Ticker", "TCS.NS", help="Yahoo symbol, e.g. RELIANCE.NS").strip().upper()
-    start = c2.date_input("Start", today_ist())
-    end = c3.date_input("End", today_ist())
-    if st.button("Generate chart", type="primary") and ticker and valid_range(start, end):
-        with st.spinner("Fetching data..."):
-            data = cached_ohlc(ticker, str(start), str(end))
+def plot_gain_grid(df, title, ncols=5):
+    """Heatmap grid of [Name, Gain (%)] sorted best -> worst (row 1 = best).
+    Grid height adapts to the number of stocks (was hard-coded 10x5)."""
+    valid = df.dropna(subset=["Gain (%)"]).reset_index(drop=True)
+    if valid.empty:
+        return None
+    nrows = math.ceil(len(valid) / ncols)
+    pad = nrows * ncols - len(valid)
+    gains = np.append(valid["Gain (%)"].to_numpy(float), [np.nan] * pad).reshape(nrows, ncols)
+    import textwrap
+    labels = [f"{textwrap.fill(str(n), 16)}\n{g:.1f}%"
+              for n, g in zip(valid["Name"], valid["Gain (%)"])]
+    annot = np.array(labels + [""] * pad, dtype=object).reshape(nrows, ncols)
+
+    cmap = LinearSegmentedColormap.from_list("rg", ["red", "white", "green"], N=256)
+    fig, ax = plt.subplots(figsize=(14, 1.6 * nrows + 2))
+    sns.heatmap(gains, annot=annot, fmt="", cmap=cmap, center=0, ax=ax,
+                annot_kws={"fontsize": 11}, linewidths=0.5, linecolor="white",
+                xticklabels=False, yticklabels=range(1, nrows + 1),
+                cbar_kws={"label": "Gain (%)", "shrink": 0.8})
+    ax.set_ylabel("Row (1 = top performers)")
+    ax.tick_params(axis="y", rotation=0)
+    ax.set_title(title)
+    fig.tight_layout()
+    return fig
+
+
+def plot_candles(ticker, data):
+    """Candlestick (+ volume when available) without weekend/holiday gaps."""
+    has_vol = bool("Volume" in data.columns and data["Volume"].fillna(0).sum() > 0)
+    fig, _ = mpf.plot(data, type="candle", style="yahoo", volume=has_vol,
+                      title=f"{ticker} Candlestick Chart", ylabel="Price",
+                      figsize=(12, 7), returnfig=True, tight_layout=True)
+    return fig
+
+
+def fig_to_data_uri(fig):
+    buf = io.BytesIO()
+    fig.savefig(buf, format="png", bbox_inches="tight")
+    plt.close(fig)
+    return "data:image/png;base64," + base64.b64encode(buf.getvalue()).decode()
+
+
+def analyze_indices(indices, index_names, route_name):
+    """Backward-compatible wrapper for the Flask routes: (table_html, plot_uri)."""
+    names = {s: index_names.get(s, s) for s in indices}
+    df = compute_index_returns(names)
+    prefix = "NSE Indices: " if route_name == "nse" else "World Indices: "
+    fig = plot_index_returns(df, "strongest", title_prefix=prefix)
+    table_html = df.to_html(classes="table table-striped table-bordered", na_rep="N/A")
+    return table_html, (fig_to_data_uri(fig) if fig else None)
+
+
+# ======================================================================= Flask
+# NOTE: the templates/ folder referenced below is not in the repo, so these
+# routes need it restored before the Flask UI works. Streamlit does not use them.
+app = Flask(__name__)
+
+
+@app.after_request
+def add_no_cache(response):
+    response.headers['Cache-Control'] = 'no-cache, no-store, must-revalidate'
+    response.headers['Pragma'] = 'no-cache'
+    response.headers['Expires'] = '0'
+    return response
+
+
+@app.route('/')
+def home():
+    return render_template('home.html')
+
+
+@app.route('/candle', methods=['GET', 'POST'])
+def candle():
+    if request.method == 'POST':
+        ticker = request.form['ticker'].strip().upper()
+        data = download_ohlc(ticker, request.form['start_date'], request.form['end_date'])
         if data.empty:
-            st.error(f"No data found for {ticker}")
-            return
-        show_fig(core.plot_candles(ticker, data))
+            return render_template('candle.html', error=f"No data found for {ticker}")
+        return render_template('candle.html', ticker=ticker,
+                               plot_url=fig_to_data_uri(plot_candles(ticker, data)))
+    return render_template('candle.html')
 
 
-
-# ============================================================ Diwali theme
-# Pure CSS (no scripts): a banner with string lights, fireworks, a rotating
-# rangoli and flickering diyas. pointer-events:none on all decoration, and
-# animations stop for users who ask their OS for reduced motion.
-DIWALI = {   # Diwali (Lakshmi Puja) date -> market notes shown on the banner
-    date(2026, 11, 8): ["🪔 Muhurat trading: Sun 08-Nov",
-                        "🔒 Market holiday: Tue 10-Nov (Balipratipada)"],
-    date(2027, 10, 29): [],
-    date(2028, 10, 17): [],
-}
+@app.route('/nse', methods=['GET', 'POST'])
+def nse():
+    if request.method == 'POST':
+        try:
+            table_html, plot_url = analyze_indices(list(NSE_INDICES), NSE_INDICES, 'nse')
+            return render_template('nse.html', table=table_html, plot_url=plot_url)
+        except Exception as e:
+            return render_template('nse.html', error=f"Error generating NSE Indices analysis: {e}")
+    return render_template('nse.html', message="Click 'Run NSE Analysis' to generate results.")
 
 
-def diwali_season(today=None):
-    """(diwali_date, notes) if today is within 5 days before / 7 days after."""
-    today = today or datetime.now(IST).date()
-    for d, notes in DIWALI.items():
-        if -5 <= (today - d).days <= 7:
-            return d, notes
-    return None, []
+@app.route('/world', methods=['GET', 'POST'])
+def world():
+    if request.method == 'POST':
+        try:
+            table_html, plot_url = analyze_indices(list(WORLD_INDICES), WORLD_INDICES, 'world')
+            return render_template('world.html', table=table_html, plot_url=plot_url)
+        except Exception as e:
+            return render_template('world.html', error=f"Error generating World Indices analysis: {e}")
+    return render_template('world.html', message="Click 'Run World Indices Analysis' to generate results.")
 
 
-def _lights_html(n_scallops=10, per=4, sag=9):
-    """Bulbs hanging on a draped wire (quadratic curves, same maths for both)."""
-    colors = ["#ffd54a", "#ff5c8a", "#4fe3c1", "#ff9f1c", "#b388ff"]
-    path, bulbs, k = "M0,3", [], 0
-    for i in range(n_scallops):
-        x0, x1 = i * 100 / n_scallops, (i + 1) * 100 / n_scallops
-        path += f" Q{(x0 + x1) / 2 * 10:.1f},{3 + 2 * sag} {x1 * 10:.1f},3"
-        for j in range(1, per + 1):
-            t = j / (per + 1)
-            x, y = x0 + t * (x1 - x0), 3 + 4 * sag * t * (1 - t)
-            c = colors[k % len(colors)]
-            bulbs.append(f'<i class="dw-bulb" style="left:{x:.2f}%;top:{y:.1f}px;'
-                         f'--c:{c};animation-delay:{(k * 0.37) % 2.2:.2f}s"></i>')
-            k += 1
-    wire = (f'<svg class="dw-wire" viewBox="0 0 1000 30" preserveAspectRatio="none">'
-            f'<path d="{path}" fill="none" stroke="#6b4a1f" stroke-width="1.6" '
-            f'vector-effect="non-scaling-stroke"/></svg>')
-    return f'<div class="dw-lights">{wire}{"".join(bulbs)}</div>'
+@app.route('/seasonality', methods=['GET', 'POST'])
+def seasonality():
+    if request.method == 'POST':
+        ticker = request.form['ticker'].strip().upper()
+        try:
+            years = int(request.form.get('year', 30))
+            heat, summary, n_years = seasonality_tables(ticker, years)
+            fmt = {c: "{:.2%}".format for c in summary.columns
+                   if c not in ("Month", "Positive", "Negative")}
+            summary_html = summary.to_html(classes='table table-striped table-bordered',
+                                           index=False, formatters=fmt, na_rep='N/A')
+            return render_template('seasonality.html', summary_table=summary_html, ticker=ticker,
+                                   plot_url=fig_to_data_uri(plot_seasonality(heat, ticker, n_years)),
+                                   actual_year=n_years)
+        except Exception as e:
+            return render_template('seasonality.html',
+                                   error=f"Error generating seasonality analysis for {ticker}: {e}")
+    return render_template('seasonality.html')
 
 
-def _firework_html(left, top, size, delay, palette):
-    import math
-    dots = []
-    for ring, (count, r) in enumerate([(18, size), (12, size * 0.58)]):
-        for i in range(count):
-            a = 2 * math.pi * i / count + ring * 0.26
-            dots.append(f"{r * math.cos(a):.0f}px {r * math.sin(a):.0f}px 0 "
-                        f"{1.6 if ring else 1.2}px {palette[(i + ring) % len(palette)]}")
-    return (f'<i class="dw-fw" style="left:{left}%;top:{top}%;'
-            f'box-shadow:{",".join(dots)};animation-delay:{delay}s"></i>')
+def _range_page(template, names, title_fmt, plotter):
+    start_str, end_str = request.form['start_date'], request.form['end_date']
+    try:
+        if start_str >= end_str:
+            raise ValueError("Start date must be before end date.")
+        df = range_gains(names, start_str, end_str)
+        fig = plotter(df, title_fmt.format(start=start_str, end=end_str))
+        if fig is None:
+            raise ValueError("No valid data for plotting")
+        table_html = df.to_html(classes='table table-striped table-bordered',
+                                na_rep='N/A', float_format='%.2f')
+        return render_template(template, plot_url=fig_to_data_uri(fig), table=table_html,
+                               start_date=start_str, end_date=end_str)
+    except Exception as e:
+        return render_template(template, error=f"Error generating analysis: {e}")
 
 
-def _diya(scale=1.0, delay=0.0):
-    return (f'<div class="dw-diya" style="transform:scale({scale});'
-            f'--d:{delay}s"><i class="dw-glow"></i><i class="dw-flame"></i>'
-            f'<i class="dw-bowl"></i></div>')
+@app.route('/custom', methods=['GET', 'POST'])
+def custom():
+    if request.method == 'POST':
+        return _range_page('custom.html', WORLD_INDICES,
+                           "Equity indices {start} to {end}", plot_gain_bars)
+    return render_template('custom.html')
 
 
-DIWALI_CSS = """
-<style>
-@import url('https://fonts.googleapis.com/css2?family=Yatra+One&display=swap');
-.dw-banner{position:relative;overflow:hidden;border-radius:16px;margin:0 0 1.2rem;
-  min-height:150px;padding:38px 24px 18px;color:#ffe9b0;
-  background:radial-gradient(120% 140% at 50% 0%,#3b1159 0%,#2a0b3c 45%,#14061f 100%);
-  box-shadow:0 8px 28px rgba(60,10,80,.35), inset 0 0 0 1px rgba(255,200,90,.25);
-  display:flex;align-items:center;gap:22px;flex-wrap:wrap}
-.dw-banner *{pointer-events:none}
-.dw-lights{position:absolute;left:0;right:0;top:0;height:34px}
-.dw-wire{position:absolute;inset:0;width:100%;height:30px}
-.dw-bulb{position:absolute;width:9px;height:12px;margin-left:-4.5px;
-  border-radius:50% 50% 50% 50%/60% 60% 40% 40%;background:var(--c);
-  box-shadow:0 0 6px 2px var(--c),0 0 14px 4px color-mix(in srgb,var(--c) 45%,transparent);
-  animation:dw-twinkle 2.2s ease-in-out infinite}
-.dw-bulb::before{content:"";position:absolute;left:2.5px;top:-3px;width:4px;height:4px;
-  background:#5a4320;border-radius:1px}
-@keyframes dw-twinkle{0%,100%{opacity:1;filter:brightness(1.15)}50%{opacity:.35;filter:brightness(.7)}}
-.dw-fw{position:absolute;width:3px;height:3px;border-radius:50%;opacity:0;
-  transform:scale(.08);animation:dw-burst 3.2s cubic-bezier(.15,.7,.3,1) infinite}
-@keyframes dw-burst{0%{opacity:0;transform:scale(.08)}8%{opacity:1}
-  65%{opacity:.85}100%{opacity:0;transform:scale(1) translateY(10px)}}
-.dw-rangoli{flex:0 0 auto;width:92px;height:92px;border-radius:50%;position:relative;
-  background:
-   radial-gradient(circle,#fff3c4 0 9%,#ff9f1c 10% 17%,transparent 18%),
-   repeating-conic-gradient(from 0deg,#ff2e63 0 15deg,#ffd54a 15deg 30deg,#08d9d6 30deg 45deg,#ff9f1c 45deg 60deg);
-  -webkit-mask:radial-gradient(circle,#000 0 46%,transparent 47% 52%,#000 53% 70%,transparent 71%);
-          mask:radial-gradient(circle,#000 0 46%,transparent 47% 52%,#000 53% 70%,transparent 71%);
-  animation:dw-spin 40s linear infinite;filter:drop-shadow(0 0 8px rgba(255,190,80,.5))}
-@keyframes dw-spin{to{transform:rotate(360deg)}}
-.dw-text,.dw-chips,.dw-diyas,.dw-rangoli{position:relative;z-index:2}
-.dw-fw{z-index:1}
-.dw-text{flex:1 1 260px}
-.dw-banner .dw-title{font-family:'Yatra One','Tiro Devanagari Hindi',serif;font-size:2.3rem;
-  font-weight:400;line-height:1.15;margin:0;padding:0;
-  background:linear-gradient(90deg,#ffd27a,#fff6d8,#ffb347,#ffd27a);background-size:200% 100%;
-  -webkit-background-clip:text;background-clip:text;color:transparent;
-  animation:dw-shine 5s linear infinite;text-shadow:0 0 22px rgba(255,190,90,.25)}
-@keyframes dw-shine{to{background-position:200% 0}}
-.dw-banner .dw-title2{margin:.1rem 0 0;font-size:.95rem;font-weight:600;letter-spacing:.32em;
-  text-transform:uppercase;color:#ffcf73}
-.dw-banner .dw-sub{margin:.3rem 0 0;padding:0;font-size:1rem;line-height:1.4;color:#f5dcae;
-  text-shadow:0 1px 6px rgba(20,6,31,.9)}
-.dw-chips{display:flex;flex-direction:column;gap:8px}
-.dw-chip{background:#2c0f40;border:1px solid rgba(255,210,122,.5);
-  color:#ffe2a6;border-radius:999px;padding:5px 12px;font-size:.88rem;white-space:nowrap}
-.dw-diyas{display:flex;align-items:flex-end;gap:4px}
-.dw-diya{position:relative;width:46px;height:52px;transform-origin:bottom center}
-.dw-bowl{position:absolute;bottom:0;left:3px;width:40px;height:18px;
-  border-radius:0 0 40px 40px/0 0 26px 26px;
-  background:linear-gradient(180deg,#e0752d,#a33d12 70%,#6e2508);
-  box-shadow:inset 0 3px 0 #f2a65a}
-.dw-flame{position:absolute;bottom:15px;left:16px;width:14px;height:24px;
-  border-radius:50% 50% 50% 50%/65% 65% 35% 35%;
-  background:radial-gradient(circle at 50% 75%,#fffbe6 0 22%,#ffd54a 40%,#ff8c1a 70%,rgba(255,80,0,0) 72%);
-  transform-origin:50% 90%;animation:dw-flicker 1.3s ease-in-out infinite alternate;
-  animation-delay:var(--d)}
-.dw-glow{position:absolute;bottom:6px;left:-12px;width:70px;height:56px;border-radius:50%;
-  background:radial-gradient(circle,rgba(255,180,60,.45),rgba(255,140,30,0) 65%);
-  animation:dw-pulse 2.6s ease-in-out infinite;animation-delay:var(--d)}
-@keyframes dw-flicker{0%{transform:scale(1,1) rotate(-2deg)}35%{transform:scale(.92,1.08) rotate(2deg)}
-  70%{transform:scale(1.05,.95) rotate(-1deg)}100%{transform:scale(.97,1.04) rotate(1.5deg)}}
-@keyframes dw-pulse{0%,100%{opacity:.75}50%{opacity:1}}
-.dw-side{display:flex;justify-content:center;gap:2px;margin:.2rem 0 .4rem}
-.dw-side .dw-diya{width:40px;height:46px}
-@media (max-width:640px){.dw-banner .dw-title{font-size:1.7rem}.dw-rangoli{width:64px;height:64px}
-  .dw-chips{flex-direction:row;flex-wrap:wrap}}
-@media (prefers-reduced-motion:reduce){.dw-banner *,.dw-side *{animation:none!important}
-  .dw-fw{opacity:.7;transform:scale(1)}}
-</style>
-"""
+@app.route('/nifty50', methods=['GET', 'POST'])
+def nifty50():
+    if request.method == 'POST':
+        names = {s: s[:-3] for s in nifty50_symbols()}
+        return _range_page('nifty50.html', names,
+                           "Nifty 50 {start} to {end} (sorted by gain)", plot_gain_grid)
+    return render_template('nifty50.html')
 
 
-def diwali_banner(notes):
-    pal1 = ["#ffd54a", "#ff9f1c", "#fff3c4"]
-    pal2 = ["#ff5c8a", "#ffd54a", "#b388ff"]
-    pal3 = ["#4fe3c1", "#fff3c4", "#ff9f1c"]
-    fireworks = "".join([
-        _firework_html(24, 34, 30, 0.0, pal1), _firework_html(62, 30, 34, 1.1, pal2),
-        _firework_html(98, 70, 26, 2.0, pal3), _firework_html(21, 84, 20, 2.6, pal3),
-        _firework_html(64, 86, 22, 1.6, pal1), _firework_html(85, 22, 22, 0.6, pal2),
-    ])
-    chips = "".join(f'<span class="dw-chip">{n}</span>' for n in notes)
-    st.markdown(
-        DIWALI_CSS
-        + '<div class="dw-banner">' + _lights_html() + fireworks
-        + '<div class="dw-rangoli"></div>'
-        + '<div class="dw-diyas">' + _diya(0.9, 0) + _diya(1.1, .4) + _diya(0.9, .8) + "</div>"
-        + '<div class="dw-text"><div class="dw-title">शुभ दीपावली</div>'
-          '<div class="dw-title2">Happy Diwali</div>'
-          '<div class="dw-sub">May your year be as bright as the diyas, and your portfolio '
-          'greener than the market. ✨</div></div>'
-        + (f'<div class="dw-chips">{chips}</div>' if chips else "")
-        + "</div>", unsafe_allow_html=True)
-
-
-PAGES = {
-    "Home": page_home,
-    "🇮🇳 Nifty 50 Performance": page_nifty50,
-    "🇮🇳 NSE Indices (All, Date Range)": page_nse_all,
-    "🇮🇳 NSE Sector Indices": page_nse,
-    "🇮🇳 Stock List Ranking": page_stock_list,
-    "🌍 World Indices": page_world,
-    "🌍 Global Indices (Date Range)": page_custom,
-    "🌍 Country ETFs (USA)": page_etfs,
-    "🛢️ Commodities": page_commodities,
-    "💱 Currencies vs USD": page_currencies,
-    "📅 Seasonality": page_seasonality,
-    "🕯️ Candlestick Chart": page_candle,
-}
-
-_diwali_day, _diwali_notes = diwali_season()
-
-with st.sidebar:
-    st.title("📈 Analysis")
-    choice = st.radio("Tool", list(PAGES), label_visibility="collapsed")
-    st.divider()
-    festive = st.toggle("🪔 Diwali lights", value=_diwali_day is not None,
-                        help="Festive banner with lights, fireworks and diyas")
-    if festive:
-        st.markdown('<div class="dw-side">' + _diya(0.8, 0) + _diya(0.8, .5)
-                    + _diya(0.8, 1) + "</div>", unsafe_allow_html=True)
-    st.caption(DATA_SOURCE)
-
-if festive:
-    diwali_banner(_diwali_notes if _diwali_day is not None else [])
-PAGES[choice]()
+if __name__ == '__main__':
+    app.run(host='127.0.0.1', port=5000, debug=False, threaded=True)
