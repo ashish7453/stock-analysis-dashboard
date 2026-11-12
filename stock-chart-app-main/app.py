@@ -314,6 +314,9 @@ NSE_HEADERS = {
     "Referer": "https://www.nseindia.com/all-reports",
 }
 NSE_MAX_FULL_DAYS = 100      # longer ranges: fetch only the two end points
+NSE_TIMEOUT = (5, 12)        # seconds: connect, read (per request)
+NSE_BUDGET = 40              # seconds: hard limit for one batch of downloads
+_NSE_BLOCKED = {"archive": 0.0, "live": 0.0}   # time until which we skip a source
 _NSE_DAY_CACHE = {}          # date -> (fetched_at, DataFrame | None)
 _NSE_NUM_COLS = {"Open Index Value": "Open", "High Index Value": "High",
                  "Low Index Value": "Low", "Closing Index Value": "Close",
@@ -388,7 +391,8 @@ def nse_index_day(day, session=None):
     last_err = None
     for url in NSE_INDEX_URLS:
         try:
-            r = http.get(url.format(day.strftime("%d%m%Y")), headers=NSE_HEADERS, timeout=20)
+            r = http.get(url.format(day.strftime("%d%m%Y")), headers=NSE_HEADERS,
+                         timeout=NSE_TIMEOUT)
         except Exception as e:                   # network error: try the mirror
             last_err = e
             continue
@@ -401,6 +405,52 @@ def nse_index_day(day, session=None):
             return df
         last_err = f"HTTP {r.status_code}"
     raise ConnectionError(f"NSE archives unreachable ({last_err})")
+
+
+def _fetch_nse_days(days, session, workers=6, budget=NSE_BUDGET, max_fails=3):
+    """Download many days in parallel with a hard time limit, so a slow or
+    hanging NSE server can never keep the page 'Running' for minutes.
+    Returns {day: frame}. Raises ConnectionError if NSE is not answering."""
+    from concurrent.futures import ThreadPoolExecutor, as_completed
+    from concurrent.futures import TimeoutError as FuturesTimeout
+    frames, fails = {}, 0
+    ex = ThreadPoolExecutor(max_workers=workers)
+    futures = {ex.submit(nse_index_day, d, session): d for d in days}
+    try:
+        for fut in as_completed(futures, timeout=budget):
+            try:
+                df = fut.result()
+            except ConnectionError as e:
+                fails += 1
+                if fails >= max_fails:
+                    raise ConnectionError(f"{fails} downloads failed: {e}") from None
+                continue
+            if df is not None:
+                frames[futures[fut]] = df
+    except FuturesTimeout:
+        raise ConnectionError(f"NSE did not answer within {budget} seconds") from None
+    finally:
+        ex.shutdown(wait=False, cancel_futures=True)   # never wait for stragglers
+    return frames
+
+
+def _with_deadline(fn, budget=NSE_BUDGET + 5):
+    """Run fn() but give up after `budget` seconds (ConnectionError)."""
+    from concurrent.futures import ThreadPoolExecutor
+    from concurrent.futures import TimeoutError as FuturesTimeout
+    ex = ThreadPoolExecutor(max_workers=1)
+    try:
+        return ex.submit(fn).result(timeout=budget)
+    except FuturesTimeout:
+        raise ConnectionError(f"NSE did not answer within {budget} seconds") from None
+    finally:
+        ex.shutdown(wait=False, cancel_futures=True)
+
+
+def _check_archive_block():
+    wait = _NSE_BLOCKED["archive"] - time.time()
+    if wait > 0:
+        raise ConnectionError(f"NSE did not answer a moment ago; trying again in {wait:.0f}s")
 
 
 def _nse_walk_back(day, limit=12, session=None):
@@ -460,12 +510,15 @@ def nse_live_snapshot(today=None):
     info = {"source": None, "as_of": "", "count": 0, "error": ""}
     # 1) NSE live feed: needs cookies from the home page first
     try:
+        if time.time() < _NSE_BLOCKED["live"]:
+            raise ConnectionError("skipped: it did not answer in the last 10 minutes")
         with requests.Session() as sess:
             sess.headers.update({**NSE_HEADERS, "Accept": "application/json, text/plain, */*",
                                  "Referer": "https://www.nseindia.com/market-data/live-market-indices"})
-            sess.get("https://www.nseindia.com", timeout=8)
-            r = sess.get(NSE_LIVE_URL, timeout=10)
+            sess.get("https://www.nseindia.com", timeout=(4, 6))
+            r = sess.get(NSE_LIVE_URL, timeout=(4, 8))
         if r.status_code != 200:
+            _NSE_BLOCKED["live"] = time.time() + 600
             raise ConnectionError(f"HTTP {r.status_code}")
         payload = r.json()
         stamp = pd.to_datetime(payload.get("timestamp", ""), format="%d-%b-%Y %H:%M", errors="coerce")
@@ -485,6 +538,8 @@ def nse_live_snapshot(today=None):
                 return pd.DataFrame.from_dict(rows, orient="index"), info
             info["error"] = "NSE live feed returned no index values"
     except Exception as e:                       # blocked / timeout / not JSON
+        if not str(e).startswith("skipped"):
+            _NSE_BLOCKED["live"] = time.time() + 600
         info["error"] = f"NSE live feed unavailable ({str(e)[:80]})"
     # 2) Yahoo fallback for the indices it carries
     try:
@@ -559,14 +614,14 @@ def nse_index_stats(start, end, max_full_days=NSE_MAX_FULL_DAYS, workers=6):
     base and end days (gain is exact; range high/low, drawdown and volatility
     are left blank). Adds Category and the latest P/E, P/B and dividend yield."""
     import requests
-    from concurrent.futures import ThreadPoolExecutor
     start_ts, end_ts = pd.Timestamp(start).normalize(), pd.Timestamp(end).normalize()
     session = requests.Session()
-    try:
-        base_day, base_df = _nse_walk_back(start_ts - timedelta(days=1), session=session)
-        days = [d for d in pd.bdate_range(start_ts, end_ts)]
-        quick = len(days) > max_full_days
+    days = [d for d in pd.bdate_range(start_ts, end_ts)]
+    quick = len(days) > max_full_days
+
+    def download():
         frames = {}
+        base_day, base_df = _nse_walk_back(start_ts - timedelta(days=1), session=session)
         if base_df is not None:
             frames[base_day] = base_df
         if quick:
@@ -574,11 +629,14 @@ def nse_index_stats(start, end, max_full_days=NSE_MAX_FULL_DAYS, workers=6):
             if df is not None and d >= start_ts:
                 frames[d] = df
         else:
-            with ThreadPoolExecutor(max_workers=workers) as ex:
-                for d, df in zip(days, ex.map(lambda d: nse_index_day(d, session), days)):
-                    if df is not None:
-                        frames[d] = df
+            frames.update(_fetch_nse_days(days, session, workers))
+        return frames
+
+    try:
+        _check_archive_block()
+        frames = _with_deadline(download)
     except ConnectionError as e:
+        _NSE_BLOCKED["archive"] = time.time() + 120
         raise DataUnavailable(
             "Could not download NSE's index file from nsearchives.nseindia.com "
             f"({e}). NSE sometimes blocks cloud servers for a few minutes; "
@@ -614,16 +672,15 @@ def nse_index_returns(reference_date=None, durations=(30, 60, 90), workers=6):
     90-day window (cached per day) so 'Off 90D High' is exact.
     Returns (DataFrame, latest_trading_day)."""
     import requests
-    from concurrent.futures import ThreadPoolExecutor
     durations = list(durations)
     ref = pd.Timestamp(reference_date or _naive_utc_now()).normalize()
     days = list(pd.bdate_range(ref - timedelta(days=max(durations) + 14), ref))
     session = requests.Session()
     try:
-        with ThreadPoolExecutor(max_workers=workers) as ex:
-            frames = {d: f for d, f in zip(days, ex.map(lambda d: nse_index_day(d, session), days))
-                      if f is not None}
+        _check_archive_block()
+        frames = _fetch_nse_days(days, session, workers)
     except ConnectionError as e:
+        _NSE_BLOCKED["archive"] = time.time() + 120
         raise DataUnavailable(
             "Could not download NSE's index file from nsearchives.nseindia.com "
             f"({e}). NSE sometimes blocks cloud servers for a few minutes; "
@@ -1026,5 +1083,21 @@ def nifty50():
     return render_template('nifty50.html')
 
 
+def _running_under_streamlit():
+    try:
+        from streamlit.runtime import exists
+        return exists()
+    except Exception:
+        return False
+
+
 if __name__ == '__main__':
-    app.run(host='127.0.0.1', port=5000, debug=False, threaded=True)
+    if _running_under_streamlit():
+        # This file was started by Streamlit (e.g. uploaded as streamlit_app.py).
+        # Starting Flask here would block forever and leave a blank page.
+        import streamlit as st
+        st.error("This is the calculation module (stock-chart-app-main/app.py), not the "
+                 "dashboard. Upload the dashboard file as streamlit_app.py in the repo root "
+                 "and put this file back in stock-chart-app-main/.")
+    else:
+        app.run(host='127.0.0.1', port=5000, debug=False, threaded=True)
