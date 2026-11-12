@@ -226,29 +226,36 @@ def _ranking_body(key, title, names, chart_title):
         except Exception as e:
             st.error(f"Error: {e}")
             return
+    show_ranking_results(df, key, chart_title)
+
+
+def show_ranking_results(df, key, chart_title, name_fmt=None, index=True):
+    """Metrics, strongest/weakest chart, table and downloads for a ranked frame."""
     ok = df.dropna(subset=["Sum of Ranks"])
     if not ok.empty:
+        okn = name_fmt(ok) if name_fmt else ok
         m = st.columns(4)
         m[0].metric("Ranked", len(ok))
-        m[1].metric("Strongest", ok.iloc[0]["Name"], f"{ok.iloc[0]['30D %']:.2f}% (30D)")
-        m[2].metric("Weakest", ok.iloc[-1]["Name"], f"{ok.iloc[-1]['30D %']:.2f}% (30D)")
+        m[1].metric("Strongest", okn.iloc[0]["Name"], f"{ok.iloc[0]['30D %']:.2f}% (30D)")
+        m[2].metric("Weakest", okn.iloc[-1]["Name"], f"{ok.iloc[-1]['30D %']:.2f}% (30D)")
         m[3].metric("Positive over 90D", f"{int((ok['90D %'] > 0).sum())} / {len(ok)}")
 
     c1, c2 = st.columns([2, 1])
     which = c1.radio("Chart", ["Strongest", "Weakest"], horizontal=True, key=f"{key}_which",
                      help="Ranked by the sum of 30/60/90-day return ranks (lower = stronger)")
     n = c2.slider("How many", 3, 10, 3, key=f"{key}_n")
-    fig = core.plot_index_returns(df, which.lower(), n=n, title_prefix=f"{chart_title}: ")
+    fig = core.plot_index_returns(name_fmt(df) if name_fmt else df, which.lower(), n=n,
+                                  title_prefix=f"{chart_title}: ")
     if fig is None:
         st.warning("No symbol returned complete data.")
     else:
         show_fig(fig)
-    st.dataframe(df, width="stretch", column_config=column_config(df))
+    st.dataframe(df, width="stretch", hide_index=not index, column_config=column_config(df))
     st.caption("30D % = latest close vs the close 30 days ago (or the last trading "
                "day before that, if it was a holiday); same for 60D and 90D. "
                "Rank 1 = best return in that window. 'Off 90D High' = how far the "
                "last close is below the highest close of the last 90 days.")
-    download_buttons(df, f"{key}_{today_ist()}", key, index=True)
+    download_buttons(df, f"{key}_{today_ist()}", key, index=index)
     missing_note(df, "Sum of Ranks")
 
 
@@ -325,7 +332,7 @@ def page_home():
     st.dataframe(pd.DataFrame([
         ("🇮🇳 Nifty 50 Performance", "All 50 stocks over any date range — heatmap or ranked bars, with drawdown and volatility"),
         ("🇮🇳 NSE Indices (All, Date Range)", "Every NSE sectoral, thematic, strategy and broad-market index over any date range, from NSE's own data"),
-        ("🇮🇳 NSE Sector Indices", "22 NSE indices ranked on 30/60/90-day returns"),
+        ("🇮🇳 NSE Sector Indices", "Every NSE sectoral index ranked on 30/60/90-day returns, from NSE's own data (thematic/strategy/broad optional)"),
         ("🇮🇳 Stock List Ranking", "Upload any CSV of symbols (Nifty Infra, Media, your watchlist…) and rank them on 30/60/90-day returns"),
         ("🌍 World Indices", "20 global indices ranked on 30/60/90-day returns"),
         ("🌍 Global Indices (Date Range)", "20 global indices over a date range you choose"),
@@ -344,8 +351,44 @@ def page_nifty50():
                "Run Nifty 50 scan")
 
 
+@st.cache_data(ttl=600, show_spinner=False)
+def cached_nse_returns(today: str, version: int = core.CALC_VERSION):
+    return core.nse_index_returns(today)
+
+
 def page_nse():
-    ranking_tool("nse", "NSE Sector Indices", core.NSE_INDICES, "NSE Indices")
+    key = "nse"
+    st.header("NSE Sector Indices")
+    st.caption("Every NSE sectoral index (and, if you choose, thematic, strategy and "
+               "broad-market indices) ranked on 30/60/90-day returns, from NSE's own "
+               "end-of-day file. Today's close appears after NSE publishes it in the evening.")
+    c1, c2 = st.columns([3, 1])
+    cats = c1.multiselect("Categories", core.NSE_CATEGORIES, ["Sectoral"], key=f"{key}_cats",
+                          help="Ranks are worked out within the categories you pick. "
+                               "Leave empty for every index.")
+    c2.write("")
+    if c2.button("Run analysis", type="primary", key=f"{key}_go", width="stretch"):
+        st.session_state[key] = True
+    if not st.session_state.get(key):
+        return
+    with st.spinner("Downloading 90 days of NSE index files (first run takes a few seconds)..."):
+        try:
+            raw, last_day = cached_nse_returns(str(today_ist()), version=core.CALC_VERSION)
+        except core.DataUnavailable as e:          # not cached: next click retries
+            st.error(str(e))
+            return
+    shown = raw[raw["Category"].isin(cats)] if cats else raw
+    if shown.empty:
+        st.warning("No indices in the selected categories.")
+        return
+    df = core.rank_returns(shown)
+    st.markdown(f"**Returns up to the close of {pd.Timestamp(last_day):%a %d-%b-%Y}** "
+                f"· {len(df)} indices · {', '.join(cats) or 'all categories'}")
+    if last_day < today_ist() and today_ist().weekday() < 5:
+        st.caption(f"⚠️ NSE has not published {today_ist():%a %d-%b} yet "
+                   "(holiday, or before the evening update).")
+    show_ranking_results(df.reset_index(drop=True), key, "NSE " + (", ".join(cats) or "all"),
+                         name_fmt=_short_names, index=False)
 
 
 def page_world():
