@@ -26,6 +26,8 @@ from matplotlib.colors import LinearSegmentedColormap
 
 HERE = os.path.dirname(os.path.abspath(__file__))
 NIFTY50_CSV = os.path.join(HERE, "ind_nifty50list.csv")
+NASDAQ100_CSV = os.path.join(HERE, "nasdaq100_list.csv")
+DOW30_CSV = os.path.join(HERE, "dow30_list.csv")
 CALC_VERSION = 10   # bump when calculations change: invalidates Streamlit's cache
 MONTHS = ["Jan", "Feb", "Mar", "Apr", "May", "Jun",
           "Jul", "Aug", "Sep", "Oct", "Nov", "Dec"]
@@ -137,6 +139,70 @@ def nifty50_symbols():
     """Yahoo symbols for the constituents in ind_nifty50list.csv."""
     df = pd.read_csv(NIFTY50_CSV)
     return [f"{s.strip()}.NS" for s in df["Symbol"].dropna()]
+
+
+# ------------------------------------------------------ index constituents
+STOCK_LISTS = {
+    # key: (bundled CSV, Yahoo suffix, Wikipedia page, expected size range)
+    "nifty50": (NIFTY50_CSV, ".NS", None, None),
+    "nasdaq100": (NASDAQ100_CSV, "",
+                  "https://en.wikipedia.org/wiki/List_of_NASDAQ-100_companies", (95, 110)),
+    "dow30": (DOW30_CSV, "", "https://en.wikipedia.org/wiki/Dow_Jones_Industrial_Average", (29, 31)),
+}
+
+
+def _yahoo_symbol(ticker, suffix):
+    """'BRK.B' -> 'BRK-B' (Yahoo uses '-' for share classes); NSE adds '.NS'."""
+    t = str(ticker).strip().upper()
+    return t + suffix if suffix else t.replace(".", "-")
+
+
+def _wikipedia_constituents(url, size_range):
+    """Current members from a Wikipedia components table: DataFrame
+    [Symbol, Company Name, Industry], or None if the page cannot be read or
+    does not look right (wrong size, no ticker column)."""
+    import requests
+    try:
+        html = requests.get(url, headers={"User-Agent": NSE_HEADERS["User-Agent"]}, timeout=10).text
+        tables = pd.read_html(io.StringIO(html))
+    except Exception:
+        return None
+    lo, hi = size_range
+    for t in tables:
+        cols = {str(c).lower(): c for c in t.columns}
+        sym = next((cols[c] for c in cols if c in ("ticker", "symbol")), None)
+        ind = next((cols[c] for c in cols if "sector" in c or "industry" in c), None)
+        comp = next((cols[c] for c in cols if c in ("company", "company name", "name")), None)
+        if sym is None or not lo <= len(t) <= hi:
+            continue
+        out = pd.DataFrame({
+            "Symbol": t[sym].astype(str).str.strip().str.replace(r"^(NYSE|NASDAQ|Nasdaq):\s*", "", regex=True),
+            "Company Name": t[comp].astype(str) if comp is not None else t[sym].astype(str),
+            "Industry": t[ind].astype(str).str.strip() if ind is not None else "Other",
+        })
+        out = out[out["Symbol"].str.fullmatch(r"[A-Z][A-Z0-9.\-]{0,9}")]
+        if lo <= len(out) <= hi:
+            return out.drop_duplicates("Symbol").reset_index(drop=True)
+    return None
+
+
+def load_constituents(key, refresh=True):
+    """(DataFrame [Symbol, Company Name, Industry, Yahoo], source text).
+    Tries the live Wikipedia list first (index members change a few times a
+    year), falling back to the CSV bundled with the app."""
+    csv, suffix, url, size = STOCK_LISTS[key]
+    df, source = None, ""
+    if refresh and url:
+        df = _wikipedia_constituents(url, size)
+        if df is not None:
+            source = "current list from Wikipedia"
+    if df is None:
+        df = pd.read_csv(csv)
+        df["Symbol"] = df["Symbol"].astype(str).str.strip()
+        df["Industry"] = df.get("Industry", pd.Series("Other", index=df.index)).fillna("Other")
+        source = f"list bundled with the app ({os.path.basename(csv)})"
+    df["Yahoo"] = [_yahoo_symbol(t, suffix) for t in df["Symbol"]]
+    return df[["Symbol", "Company Name", "Industry", "Yahoo"]], source
 
 
 def symbols_from_csv(df, suffix=".NS", limit=500):
