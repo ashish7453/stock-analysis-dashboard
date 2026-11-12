@@ -515,6 +515,8 @@ def page_home():
         ("🌍 Global Indices (Date Range)", "20 global indices over a date range you choose"),
         ("🇺🇸 USA Sectors & Themes (Date Range)", "S&P 500 sectors and US thematic indices (semiconductors, biotech, banks, AI, cybersecurity, clean energy…) over any date range"),
         ("🇺🇸 USA Sector & Theme Rankings", "The same US sectors and themes ranked on 30/60/90-day returns"),
+        ("🇺🇸 Nasdaq-100 Stock Performance", "All Nasdaq-100 stocks over any date range: market map by industry, ranked bars, drawdown and volatility"),
+        ("🇺🇸 Dow Jones 30 Stock Performance", "All 30 Dow Jones stocks over any date range: market map by sector, ranked bars, drawdown and volatility"),
         ("🌍 Country ETFs (USA)", "44 US-listed single-country ETFs ranked on 30/60/90-day returns"),
         ("🛢️ Commodities", "Gold, silver, oil, gas, base metals over a date range, with optional live refresh"),
         ("💱 Currencies vs USD", "16 currencies' moves against the US dollar over a date range"),
@@ -523,24 +525,38 @@ def page_home():
     ], columns=["Tool", "What it shows"]), hide_index=True, width="stretch")
 
 
-@st.cache_data(show_spinner=False)
-def _nifty50_industries():
-    df = pd.read_csv(core.NIFTY50_CSV)
-    return dict(zip(df["Symbol"].str.strip(), df["Industry"].str.strip()))
+@st.cache_data(ttl=24 * 3600, show_spinner=False)     # members change rarely: daily refresh
+def cached_constituents(list_key: str, version: int = core.CALC_VERSION):
+    return core.load_constituents(list_key)
 
 
-def _with_industry(df):
-    d = df.copy()
-    d["Industry"] = d["Name"].map(_nifty50_industries())
-    return d
+def stock_list_page(list_key, title, button, unit_note=None):
+    """Performance of every stock in an index over a date range: market map
+    grouped by industry/sector, ranked bars, table (Nifty 50, Nasdaq-100, Dow 30)."""
+    cons, src = cached_constituents(list_key, version=core.CALC_VERSION)
+    names = dict(zip(cons["Yahoo"], cons["Symbol"]))
+    industry = dict(zip(cons["Symbol"], cons["Industry"]))
+    views = {"Market map": lambda d, t: charts.market_map(d.assign(Industry=d["Name"].map(industry)),
+                                                          t, group_col="Industry"),
+             "Ranked bars": charts.ranked_bars}
+    range_tool(list_key, title, names, views, button, unit_note=unit_note,
+               extra=f"{len(names)} stocks · members: {src}.")
 
 
 def page_nifty50():
-    names = {s: s[:-3] for s in core.nifty50_symbols()}
-    range_tool("nifty50", "Nifty 50 Stock Performance", names,
-               {"Market map": lambda d, t: charts.market_map(_with_industry(d), t, group_col="Industry"),
-                "Ranked bars": charts.ranked_bars},
-               "Run Nifty 50 scan")
+    stock_list_page("nifty50", "Nifty 50 Stock Performance", "Run Nifty 50 scan")
+
+
+def page_nasdaq100():
+    stock_list_page("nasdaq100", "Nasdaq-100 Stock Performance", "Run Nasdaq-100 scan",
+                    unit_note="Prices in USD from Yahoo Finance (about 15 minutes delayed "
+                              "during the US session).")
+
+
+def page_dow30():
+    stock_list_page("dow30", "Dow Jones 30 Stock Performance", "Run Dow 30 scan",
+                    unit_note="Prices in USD from Yahoo Finance (about 15 minutes delayed "
+                              "during the US session).")
 
 
 def page_world():
@@ -729,6 +745,8 @@ PAGES = {
     "🌍 Country ETFs (USA)": page_etfs,
     "🇺🇸 USA Sectors & Themes (Date Range)": page_us_range,
     "🇺🇸 USA Sector & Theme Rankings": page_us_rank,
+    "🇺🇸 Nasdaq-100 Stock Performance": page_nasdaq100,
+    "🇺🇸 Dow Jones 30 Stock Performance": page_dow30,
     "🛢️ Commodities": page_commodities,
     "💱 Currencies vs USD": page_currencies,
     "📅 Seasonality": page_seasonality,
