@@ -275,8 +275,9 @@ EXCHANGE_TEXT = {
     "NSE": {"host": "nsearchives.nseindia.com", "prefix": r"^Nifty\s*", "empty": "Nifty",
             "live": "today's values come from NSE's live feed (Yahoo as a fallback)"},
     "BSE": {"host": "www.bseindia.com", "prefix": r"^(S&P\s+)?BSE\s*", "empty": "BSE",
-            "live": "the Sensex is live (Yahoo, ~15 min delay); other BSE indices update "
-                    "when BSE publishes the evening file"},
+            "live": "today's values come from Yahoo for the BSE indices it carries (Sensex, "
+                    "Bankex, Auto, IT, FMCG, Healthcare, Metal, Power and others); the rest "
+                    "update when BSE publishes the evening file"},
 }
 
 
@@ -305,10 +306,10 @@ def live_badge(live, ex="NSE"):
                    f"({live['count']} indices). Final closes replace these once NSE publishes "
                    "the evening file.", icon="📡")
     elif live.get("source") == "Yahoo" and ex == "BSE":
-        st.info(f"🟡 Live: only the Sensex has a live value (Yahoo, {live['as_of']}); BSE's "
-                "live feed blocks automated requests. Other BSE indices show their previous "
-                "close until BSE publishes the evening file; see the Last Date column.",
-                icon="📡")
+        st.info(f"🟡 Live: {live['count']} of {total} BSE indices have today's value "
+                f"(Yahoo, {live['as_of']}): {', '.join(live.get('names', []))}. BSE's own live "
+                "feed blocks automated requests, so the rest update when BSE publishes the "
+                "evening file.", icon="📡")
     elif live.get("source") == "Yahoo":
         st.warning(f"🟡 NSE's live feed is unavailable from this server, so today's values "
                    f"come from Yahoo ({live['as_of']}) for {live['count']} of {total} indices. "
@@ -370,6 +371,13 @@ def exchange_range_page(ex):
     live_badge(info.get("live"), ex)
     shown = df[df["Category"].isin(cats)] if cats else df
     shown = shown.reset_index(drop=True)
+    today_rows = df[df["Last Date"].astype(str) == str(today_ist())]
+    if (not today_rows.empty and pd.Timestamp(p["end"]).date() >= today_ist()
+            and shown[shown["Last Date"].astype(str) == str(today_ist())].empty):
+        hidden = ", ".join(f"{n} ({c})" for n, c in zip(today_rows["Name"], today_rows["Category"]))
+        st.warning(f"Today's live values exist only for {hidden}, which "
+                   f"{'is' if len(today_rows) == 1 else 'are'} not in the selected categories. "
+                   "Add that category, or pick an earlier end date.")
 
     if len(cats) != 1 and not shown.dropna(subset=["Gain (%)"]).empty:
         by = (shown.dropna(subset=["Gain (%)"]).groupby("Category")["Gain (%)"]
