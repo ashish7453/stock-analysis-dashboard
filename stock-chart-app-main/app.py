@@ -26,7 +26,7 @@ from matplotlib.colors import LinearSegmentedColormap
 
 HERE = os.path.dirname(os.path.abspath(__file__))
 NIFTY50_CSV = os.path.join(HERE, "ind_nifty50list.csv")
-CALC_VERSION = 6   # bump when calculations change: invalidates Streamlit's cache
+CALC_VERSION = 7   # bump when calculations change: invalidates Streamlit's cache
 MONTHS = ["Jan", "Feb", "Mar", "Apr", "May", "Jun",
           "Jul", "Aug", "Sep", "Oct", "Nov", "Dec"]
 
@@ -468,6 +468,45 @@ def nse_index_stats(start, end, max_full_days=NSE_MAX_FULL_DAYS, workers=6):
     return out, quick
 
 
+def nse_index_returns(reference_date=None, durations=(30, 60, 90), workers=6):
+    """Unranked 30/60/90-day returns for EVERY NSE index from NSE's daily file
+    (rank with rank_returns() after filtering). Downloads each weekday in the
+    90-day window (cached per day) so 'Off 90D High' is exact.
+    Returns (DataFrame, latest_trading_day)."""
+    import requests
+    from concurrent.futures import ThreadPoolExecutor
+    durations = list(durations)
+    ref = pd.Timestamp(reference_date or _naive_utc_now()).normalize()
+    days = list(pd.bdate_range(ref - timedelta(days=max(durations) + 14), ref))
+    session = requests.Session()
+    try:
+        with ThreadPoolExecutor(max_workers=workers) as ex:
+            frames = {d: f for d, f in zip(days, ex.map(lambda d: nse_index_day(d, session), days))
+                      if f is not None}
+    except ConnectionError as e:
+        raise DataUnavailable(
+            "Could not download NSE's index file from nsearchives.nseindia.com "
+            f"({e}). NSE sometimes blocks cloud servers for a few minutes; "
+            "wait a minute and run again.") from None
+    finally:
+        session.close()
+    if not frames:
+        raise DataUnavailable("NSE returned no index files for the last "
+                              f"{max(durations)} days; try again later.")
+    closes = pd.DataFrame({d: f["Close"] for d, f in sorted(frames.items())}).T
+    closes.index = pd.DatetimeIndex(closes.index)
+    latest_day = max(frames)
+    df = window_returns(closes, ref, durations)
+    df = df.rename(columns={"Last Price": "Last Value"})
+    df.insert(0, "Name", df.index)
+    df.insert(1, "Category", [nse_category(n) for n in df.index])
+    latest = frames[latest_day]
+    for c in ("P/E", "P/B", "Div Yield"):
+        df[c] = df["Name"].map(latest[c]) if c in latest else np.nan
+    df.index.name = "Index"
+    return df, latest_day.date()
+
+
 def range_gains(names, start, end):
     """[Name, Gain (%)] only (used by the Flask routes)."""
     return range_stats(names, start, end)[["Name", "Gain (%)"]]
@@ -503,19 +542,40 @@ def compute_index_returns(names, durations=(30, 60, 90), reference_date=None):
     # 14 extra days so the base close exists even after long holidays
     closes = download_closes(list(names), ref - timedelta(days=max(durations) + 14), ref)
 
+    df = window_returns(closes, ref, durations).drop(columns=["Last Date"])
+    df.insert(0, "Name", [names[s] for s in df.index])
+    df.index.name = "Symbol"
+    return rank_returns(df, durations)
+
+
+def window_returns(closes, ref, durations=(30, 60, 90)):
+    """Unranked 30/60/90-day returns for every column of a close table.
+    Base for each window = close on (ref - d days), or the last trading day
+    before it. Columns: d D %, Last Price, Off <max>D High %."""
+    ref = pd.Timestamp(ref).normalize()
     hi_col = f"Off {max(durations)}D High %"
     rows = {}
-    for sym in names:
-        s = closes[sym].dropna()
+    for col in closes.columns:
+        s = closes[col].dropna()
+        s = s[s.index < ref + timedelta(days=1)]
         row = {f"{d}D %": period_gain(base_window(s, ref - timedelta(days=d)))
                for d in durations}
         win = base_window(s, ref - timedelta(days=max(durations)))
         row["Last Price"] = win.iloc[-1] if len(win) else np.nan
+        row["Last Date"] = win.index[-1].date() if len(win) else None
         row[hi_col] = (win.iloc[-1] / win.max() - 1) * 100 if len(win) else np.nan
-        rows[sym] = row
-    df = pd.DataFrame.from_dict(rows, orient="index")
-    df.insert(0, "Name", [names[s] for s in df.index])
+        rows[col] = row
+    return pd.DataFrame.from_dict(rows, orient="index")
+
+
+def rank_returns(df, durations=(30, 60, 90)):
+    """Rank each window (1 = best), add Sum of Ranks, sort strongest first;
+    rows with a missing window go to the bottom. Ranks are relative to the
+    rows passed in, so filter BEFORE ranking."""
+    durations = list(durations)
+    hi_col = f"Off {max(durations)}D High %"
     ret_cols = [f"{d}D %" for d in durations]
+    df = df.drop(columns=[c for c in df.columns if c.startswith("Rank") or c == "Sum of Ranks"])
 
     ok = df.dropna(subset=ret_cols).copy()          # .copy(): no SettingWithCopy
     bad = df[df[ret_cols].isna().any(axis=1)]
@@ -527,10 +587,10 @@ def compute_index_returns(names, durations=(30, 60, 90), reference_date=None):
 
     out = pd.concat([ok, bad]) if not bad.empty else ok
     out[ret_cols + [hi_col]] = out[ret_cols + [hi_col]].round(2)
-    order = (["Name"] + ret_cols + [c for c in out.columns if c.startswith("Rank")]
-             + ["Sum of Ranks", "Last Price", hi_col])
-    out = out[[c for c in order if c in out.columns]]
-    out.index.name = "Symbol"
+    order = (["Name", "Category"] + ret_cols + [c for c in out.columns if c.startswith("Rank")]
+             + ["Sum of Ranks", "Last Price", "Last Value", hi_col])
+    extra = [c for c in out.columns if c not in order]
+    out = out[[c for c in order if c in out.columns] + extra]
     return out
 
 
