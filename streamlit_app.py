@@ -35,7 +35,8 @@ import matplotlib.pyplot as plt  # noqa: E402
 
 st.set_page_config(page_title="Analysis Dashboard", page_icon="📈", layout="wide")
 
-DATA_SOURCE = "Data: Yahoo Finance (delayed). Not investment advice."
+DATA_SOURCE = ("Data: Yahoo Finance (delayed) and NSE end-of-day files. "
+               "Not investment advice.")
 CACHE_TTL = 15 * 60          # normal runs: reuse results for 15 minutes
 LIVE_TTL = 55                # live mode: refetch roughly every minute
 LIVE_EVERY = 60              # live mode refresh interval (seconds)
@@ -95,7 +96,7 @@ def column_config(df, price_fmt="%.2f"):
     for c in df.columns:
         if c.endswith("(%)") or c.endswith("D %") or c.endswith("High %"):
             cfg[c] = PCT
-        elif "Price" in c or c in ("Range High", "Range Low"):
+        elif "Price" in c or "Value" in c or c in ("Range High", "Range Low"):
             cfg[c] = st.column_config.NumberColumn(format=price_fmt)
         elif c.startswith("Rank") or c == "Sum of Ranks":
             cfg[c] = st.column_config.NumberColumn(format="%d")
@@ -113,9 +114,11 @@ def download_buttons(df, filename, key, index=False):
                        key=f"{key}_xlsx")
 
 
-def summary_metrics(df, col="Gain (%)"):
+def summary_metrics(df, col="Gain (%)", name_fmt=None):
     """Breadth + best/worst row of st.metric cards."""
     v = df.dropna(subset=[col])
+    if name_fmt is not None:
+        v = name_fmt(v)
     if v.empty:
         return
     best, worst = v.iloc[0], v.iloc[-1]
@@ -147,10 +150,16 @@ def _range_body(key, title, names, p, views, price_fmt, unit_note):
                    f"{datetime.now(IST):%H:%M:%S} IST")
     if unit_note:
         st.info(unit_note, icon="ℹ️")
+    show_range_results(df, key, title, p, views, price_fmt)
+
+
+def show_range_results(df, key, title, p, views, price_fmt="%.2f", source="Yahoo Finance",
+                       name_fmt=None):
+    """Summary line, metrics, chart, table and downloads for a range_stats frame."""
     v = df.dropna(subset=["Gain (%)"])
     req_start, req_end = pd.Timestamp(p["start"]).date(), pd.Timestamp(p["end"]).date()
     if v.empty:
-        st.warning(f"Yahoo Finance has no closing prices between {req_start:%a %d-%b-%Y} "
+        st.warning(f"{source} has no closing prices between {req_start:%a %d-%b-%Y} "
                    f"and {req_end:%a %d-%b-%Y} yet (market holiday/weekend, or the day's "
                    "data is not published yet). Try again later or pick an earlier date.")
     else:
@@ -159,9 +168,9 @@ def _range_body(key, title, names, p, views, price_fmt, unit_note):
                     f"{l:%a %d-%b-%Y}** (base = last trading day before your start date "
                     f"{req_start:%d-%b-%Y})")
         if l < req_end and req_end.weekday() < 5:
-            st.caption(f"⚠️ Latest close available from Yahoo is {l:%a %d-%b}; "
+            st.caption(f"⚠️ Latest close available from {source} is {l:%a %d-%b}; "
                        f"no data yet for {req_end:%a %d-%b}.")
-    summary_metrics(df)
+    summary_metrics(df, name_fmt=name_fmt)
 
     view = (st.radio("Chart", list(views), horizontal=True, key=f"{key}_view")
             if len(views) > 1 else next(iter(views)))
@@ -252,12 +261,70 @@ def ranking_tool(key, title, names, chart_title=None, show_header=True):
         _ranking_body(key, title, st.session_state[key], chart_title or title)
 
 
+# ============================================== NSE all-indices (NSE EOD file)
+@st.cache_data(ttl=600, show_spinner=False)
+def cached_nse_stats(start: str, end: str, version: int = core.CALC_VERSION):
+    return core.nse_index_stats(start, end)
+
+
+def _short_names(df):
+    """'Nifty Financial Services 25/50' -> 'Financial Services 25/50' for charts."""
+    d = df.copy()
+    d["Name"] = d["Name"].str.replace(r"^Nifty\s*", "", regex=True).str.strip().replace("", "Nifty")
+    return d
+
+
+def page_nse_all():
+    key, title = "nseall", "NSE Indices (All, Date Range)"
+    st.header(title)
+    st.caption("Every NSE index: sectoral, thematic, strategy and broad market, from "
+               "NSE's own end-of-day file (nsearchives.nseindia.com), not Yahoo. "
+               "Data for a day appears after NSE publishes it in the evening.")
+    c1, c2, c3 = st.columns([1, 1, 2])
+    start = c1.date_input("Start", today_ist(), key=f"{key}_start")
+    end = c2.date_input("End", today_ist(), key=f"{key}_end")
+    cats = c3.multiselect("Categories", core.NSE_CATEGORIES, ["Sectoral"], key=f"{key}_cats",
+                          help="Leave empty to show every index")
+    if st.button("Run NSE indices scan", type="primary", key=f"{key}_go") and valid_range(start, end):
+        st.session_state[key] = {"start": str(start), "end": str(end), "live": False}
+    p = st.session_state.get(key)
+    if not p:
+        return
+    with st.spinner("Downloading NSE index files..."):
+        try:
+            df, quick = cached_nse_stats(p["start"], p["end"], version=core.CALC_VERSION)
+        except core.DataUnavailable as e:          # not cached: next click retries
+            st.error(str(e))
+            return
+    if quick:
+        st.info(f"Long range (over {core.NSE_MAX_FULL_DAYS} trading days): gains use the "
+                "base and end closes only, so range high/low, drawdown and volatility are "
+                "left blank. Use a shorter range for those.", icon="ℹ️")
+    shown = df[df["Category"].isin(cats)] if cats else df
+    shown = shown.reset_index(drop=True)
+
+    if len(cats) != 1 and not shown.dropna(subset=["Gain (%)"]).empty:
+        by = (shown.dropna(subset=["Gain (%)"]).groupby("Category")["Gain (%)"]
+                   .agg(["count", "median", "max", "min"]).round(2)
+                   .rename(columns={"count": "Indices", "median": "Median gain (%)",
+                                    "max": "Best (%)", "min": "Worst (%)"})
+                   .sort_values("Median gain (%)", ascending=False))
+        with st.expander("By category", expanded=True):
+            st.dataframe(by, width="stretch")
+
+    views = {"Heatmap": lambda d, t: core.plot_gain_grid(_short_names(d), t),
+             "Ranked bars": lambda d, t: core.plot_gain_bars(_short_names(d), t)}
+    show_range_results(shown, key, f"NSE {', '.join(cats) or 'all'} indices", p, views,
+                       source="NSE", name_fmt=_short_names)
+
+
 # ===================================================================== pages
 def page_home():
     st.title("Analysis Dashboard")
     st.caption("Pick a tool from the sidebar.")
     st.dataframe(pd.DataFrame([
         ("🇮🇳 Nifty 50 Performance", "All 50 stocks over any date range — heatmap or ranked bars, with drawdown and volatility"),
+        ("🇮🇳 NSE Indices (All, Date Range)", "Every NSE sectoral, thematic, strategy and broad-market index over any date range, from NSE's own data"),
         ("🇮🇳 NSE Sector Indices", "22 NSE indices ranked on 30/60/90-day returns"),
         ("🇮🇳 Stock List Ranking", "Upload any CSV of symbols (Nifty Infra, Media, your watchlist…) and rank them on 30/60/90-day returns"),
         ("🌍 World Indices", "20 global indices ranked on 30/60/90-day returns"),
@@ -544,6 +611,7 @@ def diwali_banner(notes):
 PAGES = {
     "Home": page_home,
     "🇮🇳 Nifty 50 Performance": page_nifty50,
+    "🇮🇳 NSE Indices (All, Date Range)": page_nse_all,
     "🇮🇳 NSE Sector Indices": page_nse,
     "🇮🇳 Stock List Ranking": page_stock_list,
     "🌍 World Indices": page_world,
