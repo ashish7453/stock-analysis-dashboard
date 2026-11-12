@@ -85,9 +85,17 @@ def cached_ohlc(ticker: str, start: str, end: str):
 
 
 # ------------------------------------------------------------------- helpers
-def show_fig(fig):
-    st.pyplot(fig, clear_figure=True)
+def show_fig(fig, max_height="85vh"):
+    """Show a chart as large as possible WITHOUT being taller than the visible
+    area: full width, but capped at `max_height` with its shape kept, so the
+    whole chart is on screen (also inside an embed box)."""
+    import base64
+    buf = io.BytesIO()
+    fig.savefig(buf, format="png", dpi=150, bbox_inches="tight")
     plt.close(fig)
+    b64 = base64.b64encode(buf.getvalue()).decode()
+    st.html(f'<img src="data:image/png;base64,{b64}" alt="chart" style="display:block;'
+            f'margin:0 auto;width:auto;height:auto;max-width:100%;max-height:{max_height}">')
 
 
 def valid_range(start, end):
