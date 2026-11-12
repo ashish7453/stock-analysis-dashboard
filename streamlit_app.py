@@ -41,6 +41,10 @@ st.html("""<style>
 [data-testid="stMainBlockContainer"], .block-container {
   padding-left: 1rem !important; padding-right: 1rem !important;
   padding-top: 1rem !important; max-width: 100% !important; }
+/* Not embedded: Streamlit's 60px header bar (Deploy / menu) sits on top of the
+   page, so leave room for it or it covers the Tool dropdown. */
+.stApp:not(.streamlit-embedded) [data-testid="stMainBlockContainer"],
+.stApp:not(.streamlit-embedded) .block-container { padding-top: 4rem !important; }
 </style>""")
 
 DATA_SOURCE = ("Data: Yahoo Finance (delayed) and NSE/BSE end-of-day files. "
