@@ -26,7 +26,7 @@ from matplotlib.colors import LinearSegmentedColormap
 
 HERE = os.path.dirname(os.path.abspath(__file__))
 NIFTY50_CSV = os.path.join(HERE, "ind_nifty50list.csv")
-CALC_VERSION = 8   # bump when calculations change: invalidates Streamlit's cache
+CALC_VERSION = 9   # bump when calculations change: invalidates Streamlit's cache
 MONTHS = ["Jan", "Feb", "Mar", "Apr", "May", "Jun",
           "Jul", "Aug", "Sep", "Oct", "Nov", "Dec"]
 
@@ -316,8 +316,8 @@ NSE_HEADERS = {
 NSE_MAX_FULL_DAYS = 100      # longer ranges: fetch only the two end points
 NSE_TIMEOUT = (5, 12)        # seconds: connect, read (per request)
 NSE_BUDGET = 40              # seconds: hard limit for one batch of downloads
-_NSE_BLOCKED = {"archive": 0.0, "live": 0.0}   # time until which we skip a source
-_NSE_DAY_CACHE = {}          # date -> (fetched_at, DataFrame | None)
+_NSE_BLOCKED = {}            # "NSE:archive" / "BSE:live" ... -> time until which we skip it
+_NSE_DAY_CACHE = {}          # (exchange, date) -> (fetched_at, DataFrame | None)
 _NSE_NUM_COLS = {"Open Index Value": "Open", "High Index Value": "High",
                  "Low Index Value": "Low", "Closing Index Value": "Close",
                  "Change(%)": "Day Chg (%)", "P/E": "P/E", "P/B": "P/B",
@@ -371,51 +371,56 @@ def _parse_nse_csv(text):
     return out[~out.index.duplicated()]
 
 
-def nse_index_day(day, session=None):
-    """All NSE indices for one trading day: DataFrame indexed by index name,
-    None when NSE has no file for that day (holiday, or not published yet).
-    Raises ConnectionError if NSE could not be reached / refused us."""
+def nse_index_day(day, session=None, ex="NSE"):
+    """All indices of exchange `ex` for one trading day: DataFrame indexed by
+    index name, None when there is no file for that day (holiday, or not
+    published yet). Raises ConnectionError if the exchange refused us."""
     import requests
+    src = INDEX_SOURCES[ex]
     day = pd.Timestamp(day).normalize()
     now = time.time()
-    hit = _NSE_DAY_CACHE.get(day)
+    hit = _NSE_DAY_CACHE.get((ex, day))
     if hit is not None:
         fetched_at, df = hit
         old_day = (pd.Timestamp(_naive_utc_now()).normalize() - day).days > 4
         if df is not None or old_day or now - fetched_at < 600:
             return df
     if day.weekday() >= 5:                       # weekend: no file, no request
-        _NSE_DAY_CACHE[day] = (now, None)
+        _NSE_DAY_CACHE[(ex, day)] = (now, None)
         return None
     http = session or requests
     last_err = None
-    for url in NSE_INDEX_URLS:
+    for url in src["urls"]:
         try:
-            r = http.get(url.format(day.strftime("%d%m%Y")), headers=NSE_HEADERS,
+            r = http.get(url.format(day.strftime("%d%m%Y")), headers=src["headers"],
                          timeout=NSE_TIMEOUT)
         except Exception as e:                   # network error: try the mirror
             last_err = e
             continue
         if r.status_code == 404:
-            _NSE_DAY_CACHE[day] = (now, None)
+            _NSE_DAY_CACHE[(ex, day)] = (now, None)
             return None
-        if r.status_code == 200 and "Index Name" in r.text[:200]:
-            df = _parse_nse_csv(r.text)
-            _NSE_DAY_CACHE[day] = (now, df)
+        if r.status_code == 200 and src["marker"] in r.text[:300]:
+            df = src["parse"](r.text)
+            _NSE_DAY_CACHE[(ex, day)] = (now, df)
             return df
+        if r.status_code == 200 and src["html_is_holiday"]:
+            # BSE answers non-trading days with a placeholder page, not a 404
+            _NSE_DAY_CACHE[(ex, day)] = (now, None)
+            return None
         last_err = f"HTTP {r.status_code}"
-    raise ConnectionError(f"NSE archives unreachable ({last_err})")
+    raise ConnectionError(f"{ex} archives unreachable ({last_err})")
 
 
-def _fetch_nse_days(days, session, workers=6, budget=NSE_BUDGET, max_fails=3):
+def _fetch_nse_days(days, session, workers=6, budget=NSE_BUDGET, max_fails=3, ex="NSE"):
     """Download many days in parallel with a hard time limit, so a slow or
-    hanging NSE server can never keep the page 'Running' for minutes.
-    Returns {day: frame}. Raises ConnectionError if NSE is not answering."""
+    hanging exchange server can never keep the page 'Running' for minutes.
+    Returns {day: frame}. Raises ConnectionError if it is not answering."""
     from concurrent.futures import ThreadPoolExecutor, as_completed
     from concurrent.futures import TimeoutError as FuturesTimeout
     frames, fails = {}, 0
-    ex = ThreadPoolExecutor(max_workers=workers)
-    futures = {ex.submit(nse_index_day, d, session): d for d in days}
+    pool = ThreadPoolExecutor(max_workers=workers)
+    futures = {pool.submit(nse_index_day, d, session, ex): d for d in days}
     try:
         for fut in as_completed(futures, timeout=budget):
             try:
@@ -428,9 +433,9 @@ def _fetch_nse_days(days, session, workers=6, budget=NSE_BUDGET, max_fails=3):
             if df is not None:
                 frames[futures[fut]] = df
     except FuturesTimeout:
-        raise ConnectionError(f"NSE did not answer within {budget} seconds") from None
+        raise ConnectionError(f"{ex} did not answer within {budget} seconds") from None
     finally:
-        ex.shutdown(wait=False, cancel_futures=True)   # never wait for stragglers
+        pool.shutdown(wait=False, cancel_futures=True)   # never wait for stragglers
     return frames
 
 
@@ -438,27 +443,33 @@ def _with_deadline(fn, budget=NSE_BUDGET + 5):
     """Run fn() but give up after `budget` seconds (ConnectionError)."""
     from concurrent.futures import ThreadPoolExecutor
     from concurrent.futures import TimeoutError as FuturesTimeout
-    ex = ThreadPoolExecutor(max_workers=1)
+    pool = ThreadPoolExecutor(max_workers=1)
     try:
-        return ex.submit(fn).result(timeout=budget)
+        return pool.submit(fn).result(timeout=budget)
     except FuturesTimeout:
-        raise ConnectionError(f"NSE did not answer within {budget} seconds") from None
+        raise ConnectionError(f"no answer within {budget} seconds") from None
     finally:
-        ex.shutdown(wait=False, cancel_futures=True)
+        pool.shutdown(wait=False, cancel_futures=True)
 
 
-def _check_archive_block():
-    wait = _NSE_BLOCKED["archive"] - time.time()
+def _check_archive_block(ex="NSE"):
+    wait = _NSE_BLOCKED.get(f"{ex}:archive", 0) - time.time()
     if wait > 0:
-        raise ConnectionError(f"NSE did not answer a moment ago; trying again in {wait:.0f}s")
+        raise ConnectionError(f"{ex} did not answer a moment ago; trying again in {wait:.0f}s")
 
 
-def _nse_walk_back(day, limit=12, session=None):
+def _blocked_message(ex, err):
+    src = INDEX_SOURCES[ex]
+    return (f"Could not download {ex}'s index file from {src['host']} ({err}). "
+            f"{ex} sometimes blocks cloud servers for a few minutes; wait a minute and run again.")
+
+
+def _nse_walk_back(day, limit=12, session=None, ex="NSE"):
     """(date, frame) of the latest trading day on or before `day`."""
     day = pd.Timestamp(day).normalize()
     for back in range(limit):
         d = day - timedelta(days=back)
-        df = nse_index_day(d, session)
+        df = nse_index_day(d, session, ex)
         if df is not None:
             return d, df
     return None, None
@@ -510,7 +521,7 @@ def nse_live_snapshot(today=None):
     info = {"source": None, "as_of": "", "count": 0, "error": ""}
     # 1) NSE live feed: needs cookies from the home page first
     try:
-        if time.time() < _NSE_BLOCKED["live"]:
+        if time.time() < _NSE_BLOCKED.get("NSE:live", 0):
             raise ConnectionError("skipped: it did not answer in the last 10 minutes")
         with requests.Session() as sess:
             sess.headers.update({**NSE_HEADERS, "Accept": "application/json, text/plain, */*",
@@ -518,7 +529,7 @@ def nse_live_snapshot(today=None):
             sess.get("https://www.nseindia.com", timeout=(4, 6))
             r = sess.get(NSE_LIVE_URL, timeout=(4, 8))
         if r.status_code != 200:
-            _NSE_BLOCKED["live"] = time.time() + 600
+            _NSE_BLOCKED["NSE:live"] = time.time() + 600
             raise ConnectionError(f"HTTP {r.status_code}")
         payload = r.json()
         stamp = pd.to_datetime(payload.get("timestamp", ""), format="%d-%b-%Y %H:%M", errors="coerce")
@@ -539,35 +550,41 @@ def nse_live_snapshot(today=None):
             info["error"] = "NSE live feed returned no index values"
     except Exception as e:                       # blocked / timeout / not JSON
         if not str(e).startswith("skipped"):
-            _NSE_BLOCKED["live"] = time.time() + 600
+            _NSE_BLOCKED["NSE:live"] = time.time() + 600
         info["error"] = f"NSE live feed unavailable ({str(e)[:80]})"
     # 2) Yahoo fallback for the indices it carries
+    return _yahoo_live(YAHOO_FOR_NSE, today, info)
+
+
+def _yahoo_live(mapping, today, info):
+    """Today's Yahoo value for {index name or alias: yahoo symbol}."""
     try:
-        syms = list(YAHOO_FOR_NSE.values())
+        syms = sorted(set(mapping.values()))
         closes = download_closes(syms, pd.Timestamp(today) - timedelta(days=6), today,
                                  retry_wait=1.0)
         today_rows = closes[closes.index.normalize() == pd.Timestamp(today)]
         if not today_rows.empty:
             last = today_rows.iloc[-1]
             rows = {_norm_index_name(nm): {"Close": last[sym]}
-                    for nm, sym in YAHOO_FOR_NSE.items() if pd.notna(last[sym])}
+                    for nm, sym in mapping.items() if pd.notna(last[sym])}
             if rows:
-                info.update(source="Yahoo", as_of="delayed ~15 min", count=len(rows))
+                info.update(source="Yahoo", as_of="delayed ~15 min",
+                            count=len({sym for sym in mapping.values() if pd.notna(last[sym])}))
                 return pd.DataFrame.from_dict(rows, orient="index"), info
-        info["error"] += "; Yahoo has no values for today yet"
+        info["error"] = (info["error"] + "; " if info["error"] else "") + "Yahoo has no values for today yet"
     except Exception as e:
-        info["error"] += f"; Yahoo fallback failed ({str(e)[:60]})"
+        info["error"] = (info["error"] + "; " if info["error"] else "") + f"Yahoo fallback failed ({str(e)[:60]})"
     return None, info
 
 
-def _add_live_today(frames, columns, end_day):
+def _add_live_today(frames, columns, end_day, ex="NSE"):
     """If `end_day` is today (a weekday) and NSE's file for today is not out yet,
     add a frame of today's live values for the matching index names.
     Returns info dict (empty when live data was not needed)."""
     today = pd.Timestamp(_today_ist())
     if pd.Timestamp(end_day).normalize() < today or today.weekday() >= 5 or today in frames:
         return {}
-    live, info = nse_live_snapshot(today.date())
+    live, info = INDEX_SOURCES[ex]["live"](today.date())
     if live is None:
         return info
     key_of = {_norm_index_name(c): c for c in columns}
@@ -606,7 +623,7 @@ def _fundamentals(frames, names):
     return out
 
 
-def nse_index_stats(start, end, max_full_days=NSE_MAX_FULL_DAYS, workers=6):
+def nse_index_stats(start, end, max_full_days=NSE_MAX_FULL_DAYS, workers=6, ex="NSE"):
     """range_stats() for EVERY NSE index, from NSE's daily all-indices file.
 
     Same base rule as the other tools: base = close of the last trading day
@@ -621,34 +638,39 @@ def nse_index_stats(start, end, max_full_days=NSE_MAX_FULL_DAYS, workers=6):
 
     def download():
         frames = {}
-        base_day, base_df = _nse_walk_back(start_ts - timedelta(days=1), session=session)
+        base_day, base_df = _nse_walk_back(start_ts - timedelta(days=1), session=session, ex=ex)
         if base_df is not None:
             frames[base_day] = base_df
         if quick:
-            d, df = _nse_walk_back(end_ts, session=session)
+            d, df = _nse_walk_back(end_ts, session=session, ex=ex)
             if df is not None and d >= start_ts:
                 frames[d] = df
         else:
-            frames.update(_fetch_nse_days(days, session, workers))
+            frames.update(_fetch_nse_days(days, session, workers, ex=ex))
         return frames
 
     try:
-        _check_archive_block()
+        _check_archive_block(ex)
         frames = _with_deadline(download)
     except ConnectionError as e:
-        _NSE_BLOCKED["archive"] = time.time() + 120
-        raise DataUnavailable(
-            "Could not download NSE's index file from nsearchives.nseindia.com "
-            f"({e}). NSE sometimes blocks cloud servers for a few minutes; "
-            "wait a minute and run again.") from None
+        _NSE_BLOCKED[f"{ex}:archive"] = time.time() + 120
+        raise DataUnavailable(_blocked_message(ex, e)) from None
     finally:
         session.close()
 
     if not frames:
         return (pd.DataFrame(columns=RANGE_COLUMNS + ["Category", "P/E", "P/B", "Div Yield"]),
-                {"quick": quick, "live": {}})
+                {"quick": quick, "live": {},
+                 "note": (f"{ex} has no index files for this range."
+                          + (" BSE keeps only about the last 18 months of index files."
+                             if ex == "BSE" else ""))})
     all_names = sorted(set().union(*[f.index for f in frames.values()]))
-    live_info = _add_live_today(frames, all_names, end_ts)
+    note = ""
+    if not any(d < start_ts for d in frames):       # no base close found
+        note = (f"{ex} has no index file for the trading day before "
+                f"{start_ts:%d-%b-%Y}, so gains could not be measured from your start date."
+                + (" BSE keeps only about the last 18 months of index files." if ex == "BSE" else ""))
+    live_info = _add_live_today(frames, all_names, end_ts, ex)
     closes = pd.DataFrame({d: f["Close"] for d, f in sorted(frames.items())}).T
     closes.index = pd.DatetimeIndex(closes.index)
     names = {c: c for c in closes.columns}
@@ -657,16 +679,16 @@ def nse_index_stats(start, end, max_full_days=NSE_MAX_FULL_DAYS, workers=6):
         out[["Range High", "Range Low", "Off High (%)", "Max Drawdown (%)",
              "Volatility (%)", "Up Days (%)"]] = np.nan
     fund = _fundamentals(frames, list(out["Name"]))
-    out["Category"] = [nse_category(n) for n in out["Name"]]
+    out["Category"] = [INDEX_SOURCES[ex]["category"](n) for n in out["Name"]]
     for c in ("P/E", "P/B", "Div Yield"):
         out[c] = out["Name"].map(fund[c])
     out = out.drop(columns=["Symbol"]).rename(columns={"Base Price": "Base Value",
                                                        "Last Price": "Last Value"})
     out = out[["Name", "Category"] + [c for c in out.columns if c not in ("Name", "Category")]]
-    return out, {"quick": quick, "live": live_info}
+    return out, {"quick": quick, "live": live_info, "note": note}
 
 
-def nse_index_returns(reference_date=None, durations=(30, 60, 90), workers=6):
+def nse_index_returns(reference_date=None, durations=(30, 60, 90), workers=6, ex="NSE"):
     """Unranked 30/60/90-day returns for EVERY NSE index from NSE's daily file
     (rank with rank_returns() after filtering). Downloads each weekday in the
     90-day window (cached per day) so 'Off 90D High' is exact.
@@ -677,33 +699,116 @@ def nse_index_returns(reference_date=None, durations=(30, 60, 90), workers=6):
     days = list(pd.bdate_range(ref - timedelta(days=max(durations) + 14), ref))
     session = requests.Session()
     try:
-        _check_archive_block()
-        frames = _fetch_nse_days(days, session, workers)
+        _check_archive_block(ex)
+        frames = _with_deadline(lambda: _fetch_nse_days(days, session, workers, ex=ex))
     except ConnectionError as e:
-        _NSE_BLOCKED["archive"] = time.time() + 120
-        raise DataUnavailable(
-            "Could not download NSE's index file from nsearchives.nseindia.com "
-            f"({e}). NSE sometimes blocks cloud servers for a few minutes; "
-            "wait a minute and run again.") from None
+        _NSE_BLOCKED[f"{ex}:archive"] = time.time() + 120
+        raise DataUnavailable(_blocked_message(ex, e)) from None
     finally:
         session.close()
     if not frames:
-        raise DataUnavailable("NSE returned no index files for the last "
+        raise DataUnavailable(f"{ex} returned no index files for the last "
                               f"{max(durations)} days; try again later.")
     all_names = sorted(set().union(*[f.index for f in frames.values()]))
-    live_info = _add_live_today(frames, all_names, ref)
+    latest_day = max(frames)                       # last PUBLISHED close (before live)
+    live_info = _add_live_today(frames, all_names, ref, ex)
     closes = pd.DataFrame({d: f["Close"] for d, f in sorted(frames.items())}).T
     closes.index = pd.DatetimeIndex(closes.index)
-    latest_day = max(frames)
     df = window_returns(closes, ref, durations)
     df = df.rename(columns={"Last Price": "Last Value"})
     df.insert(0, "Name", df.index)
-    df.insert(1, "Category", [nse_category(n) for n in df.index])
+    df.insert(1, "Category", [INDEX_SOURCES[ex]["category"](n) for n in df.index])
     fund = _fundamentals(frames, list(df["Name"]))
     for c in ("P/E", "P/B", "Div Yield"):
         df[c] = df["Name"].map(fund[c])
     df.index.name = "Index"
     return df, {"last_day": latest_day.date(), "live": live_info}
+
+
+# ------------------------------------------------ BSE all-indices (EOD file)
+# BSE's JSON API has blocked scripts since Sept 2026, but its daily
+# "Index Bhavcopy" CSV on www.bseindia.com is a plain static file with every
+# BSE index (open/high/low/close). BSE keeps roughly the last 18 months.
+BSE_INDEX_URLS = ["https://www.bseindia.com/bsedata/Index_Bhavcopy/INDEXSummary_{}.csv"]
+BSE_HEADERS = {**NSE_HEADERS, "Referer": "https://www.bseindia.com/",
+               "Origin": "https://www.bseindia.com"}
+BSE_CATEGORIES = ["Sectoral", "Thematic", "Strategy", "Broad market", "Other"]
+_BSE_SECTOR = re.compile(
+    r"\b(auto|bankex|banks?|capital goods|consumer discretionary|consumer durables|energy|"
+    r"fmcg|finance|financial services|healthcare|it|industrials|metal|oil (?:&|and) gas|"
+    r"power|private banks|realty|teck|telecom(?:munication)?|utilities|commodities|"
+    r"basic materials|services|fast moving consumer goods|information technology)\b", re.I)
+_BSE_STRATEGY = re.compile(
+    r"momentum|quality|value|low vol|volatility|dividend|esg|alpha|equal weight|shariah|"
+    r"enhanced|factor|leverage|inverse|\btri\b", re.I)
+_BSE_BROAD = re.compile(
+    r"sensex|\b(100|150|200|250|400|500|1000)\b|allcap|largecap|large ?cap|midcap|mid ?cap|"
+    r"smallcap|small ?cap|microcap|large ?mid|mid ?small|total market", re.I)
+_BSE_OTHER = re.compile(r"dollex|bond|gilt|g-?sec|t-?bill|sovereign|liquid rate|\bsdl\b", re.I)
+
+
+def bse_category(name):
+    n = re.sub(r"^(s&p\s+)?bse\s*", "", str(name).strip(), flags=re.I)
+    if _BSE_OTHER.search(n):
+        return "Other"
+    if _BSE_STRATEGY.search(n):
+        return "Strategy"
+    if _BSE_SECTOR.search(n) and not re.search(r"\b(100|150|200|250|400|500)\b", n):
+        return "Sectoral"
+    if _BSE_BROAD.search(n):
+        return "Broad market"
+    return "Thematic"
+
+
+def _parse_bse_csv(text):
+    df = pd.read_csv(io.StringIO(text.lstrip("\ufeff")), index_col=False)
+    df.columns = [str(c).strip() for c in df.columns]
+    if "ClosePrice" not in df.columns:
+        raise ValueError("unexpected BSE file format")
+    name_col = "IndexName" if "IndexName" in df.columns else "IndexID"
+    names = df[name_col].astype(str).str.strip()
+    if "IndexID" in df.columns:                    # fall back to the ID if a name is blank
+        names = names.where(names.ne("") & names.ne("nan"), df["IndexID"].astype(str).str.strip())
+    out = pd.DataFrame(index=pd.Index(names, name="Index Name"))
+    for src, dst in {"OpenPrice": "Open", "HighPrice": "High", "LowPrice": "Low",
+                     "ClosePrice": "Close", "PE": "P/E", "PB": "P/B", "DivYield": "Div Yield"}.items():
+        if src in df.columns:
+            vals = pd.to_numeric(df[src].astype(str).str.replace(",", "").str.strip(),
+                                 errors="coerce").to_numpy()
+            out[dst] = np.where(vals > 0, vals, np.nan)
+    out = out[(out.index.str.len() > 0) & (out.index != "nan")]
+    return out[~out.index.duplicated()]
+
+
+YAHOO_FOR_BSE = {"BSE SENSEX": "^BSESN", "SENSEX": "^BSESN", "S&P BSE SENSEX": "^BSESN"}
+
+
+def bse_live_snapshot(today=None):
+    """BSE's live API blocks scripts, so only the Sensex (via Yahoo) is live."""
+    today = today or _today_ist()
+    info = {"source": None, "as_of": "", "count": 0,
+            "error": "BSE's live feed blocks automated requests"}
+    return _yahoo_live(YAHOO_FOR_BSE, today, info)
+
+
+def bse_index_stats(start, end, **kw):
+    return nse_index_stats(start, end, ex="BSE", **kw)
+
+
+def bse_index_returns(reference_date=None, **kw):
+    return nse_index_returns(reference_date, ex="BSE", **kw)
+
+
+INDEX_SOURCES = {
+    "NSE": {"urls": NSE_INDEX_URLS, "headers": NSE_HEADERS, "marker": "Index Name",
+            "parse": _parse_nse_csv, "category": nse_category, "live": nse_live_snapshot,
+            "html_is_holiday": False, "host": "nsearchives.nseindia.com",
+            "categories": NSE_CATEGORIES},
+    "BSE": {"urls": BSE_INDEX_URLS, "headers": BSE_HEADERS, "marker": "ClosePrice",
+            "parse": _parse_bse_csv, "category": bse_category, "live": bse_live_snapshot,
+            "html_is_holiday": True, "host": "www.bseindia.com",
+            "categories": BSE_CATEGORIES},
+}
 
 
 def range_gains(names, start, end):
@@ -933,7 +1038,7 @@ def plot_gain_grid(df, title, ncols=5):
     pad = nrows * ncols - len(valid)
     gains = np.append(valid["Gain (%)"].to_numpy(float), [np.nan] * pad).reshape(nrows, ncols)
     import textwrap
-    labels = [f"{textwrap.fill(str(n), 16)}\n{g:.1f}%"
+    labels = [f"{textwrap.fill(str(n), 16, break_long_words=False)}\n{g:.1f}%"
               for n, g in zip(valid["Name"], valid["Gain (%)"])]
     annot = np.array(labels + [""] * pad, dtype=object).reshape(nrows, ncols)
 
