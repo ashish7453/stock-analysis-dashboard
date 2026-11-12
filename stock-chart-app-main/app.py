@@ -949,7 +949,7 @@ def plot_index_returns(df, which="strongest", n=3, title_prefix=""):
     pick = ranked.head(n) if which == "strongest" else ranked.tail(n).iloc[::-1]
     ret_cols = [c for c in df.columns if c.endswith("D %") and not c.startswith("Off")]
 
-    fig, ax = plt.subplots(figsize=(max(10, 2.4 * len(pick)), 7))
+    fig, ax = plt.subplots(figsize=(max(14, 2.4 * len(pick)), 6.2))
     width = 0.8 / len(ret_cols)
     x = np.arange(len(pick))
     for i, c in enumerate(ret_cols):
@@ -1013,7 +1013,7 @@ def seasonality_tables(ticker, years, include_partial=False):
 def plot_seasonality(heat, ticker, n_years):
     colors = ["#C71585", "#DB7093", "#FFFFFF", "#228B22", "#006400"]
     cmap = LinearSegmentedColormap.from_list("dark_cmap", colors, N=256)
-    fig, ax = plt.subplots(figsize=(12, max(4, 0.45 * len(heat) + 2)))
+    fig, ax = plt.subplots(figsize=(15, max(4, 0.45 * len(heat) + 2)))
     sns.heatmap(heat, annot=True, fmt=".2%", cmap=cmap, center=0, ax=ax,
                 cbar_kws={"label": "Monthly return"})
     # Labels come from the DataFrame columns, so they sit centred on the
@@ -1041,8 +1041,8 @@ def plot_gain_bars(df, title, value_col="Gain (%)"):
     colors = ["#2e7d32" if g > 0 else "#c62828" for g in gains]
     span = max(float(np.abs(gains).max()), 1e-9)
 
-    if len(valid) > 15:
-        fig, ax = plt.subplots(figsize=(12, 0.32 * len(valid) + 2))
+    if len(valid) > 60:
+        fig, ax = plt.subplots(figsize=(14, 0.3 * len(valid) + 2))
         y = np.arange(len(valid))
         ax.barh(y, gains, color=colors)
         ax.set_yticks(y)
@@ -1056,26 +1056,34 @@ def plot_gain_bars(df, title, value_col="Gain (%)"):
         ax.grid(axis="x", linestyle="--", alpha=0.5)
         ax.set_xlim(min(0, gains.min()) - 0.15 * span, max(0, gains.max()) + 0.15 * span)
     else:
-        fig, ax = plt.subplots(figsize=(12, 7))
+        many = len(valid) > 15
+        # Wide, short shape so the whole chart fits on screen at full width.
+        fig, ax = plt.subplots(figsize=(max(16, 0.34 * len(valid)), 7 if many else 6.2))
         bars = ax.bar(names, gains, color=colors)
         for b, g in zip(bars, gains):
-            ax.text(b.get_x() + b.get_width() / 2, g, f"{g:.2f}%", ha="center",
-                    va="bottom" if g >= 0 else "top", fontsize=10)
+            ax.text(b.get_x() + b.get_width() / 2, g, f" {g:.2f}% " if many else f"{g:.2f}%",
+                    ha="center", va="bottom" if g >= 0 else "top",
+                    fontsize=8 if many else 11, rotation=90 if many else 0)
         ax.axhline(0, color="grey", linewidth=0.8)
         ax.set_ylabel(value_col)
-        plt.setp(ax.get_xticklabels(), rotation=45, ha="right")
+        ax.margins(y=0.18 if many else 0.1)            # room for the value labels
+        if many:
+            plt.setp(ax.get_xticklabels(), rotation=90, ha="center", fontsize=9)
+        else:
+            plt.setp(ax.get_xticklabels(), rotation=30, ha="right", fontsize=11)
         ax.grid(axis="y", linestyle="--", alpha=0.6)
     ax.set_title(title)
     fig.tight_layout()
     return fig
 
 
-def plot_gain_grid(df, title, ncols=5):
+def plot_gain_grid(df, title, ncols=None):
     """Heatmap grid of [Name, Gain (%)] sorted best -> worst (row 1 = best).
     Grid height adapts to the number of stocks (was hard-coded 10x5)."""
     valid = df.dropna(subset=["Gain (%)"]).reset_index(drop=True)
     if valid.empty:
         return None
+    ncols = ncols or (10 if len(valid) > 30 else 5)   # wide grid fits the screen
     nrows = math.ceil(len(valid) / ncols)
     pad = nrows * ncols - len(valid)
     gains = np.append(valid["Gain (%)"].to_numpy(float), [np.nan] * pad).reshape(nrows, ncols)
@@ -1085,7 +1093,7 @@ def plot_gain_grid(df, title, ncols=5):
     annot = np.array(labels + [""] * pad, dtype=object).reshape(nrows, ncols)
 
     cmap = LinearSegmentedColormap.from_list("rg", ["red", "white", "green"], N=256)
-    fig, ax = plt.subplots(figsize=(14, 1.6 * nrows + 2))
+    fig, ax = plt.subplots(figsize=(18 if ncols > 5 else 16, 1.25 * nrows + 1.6))
     sns.heatmap(gains, annot=annot, fmt="", cmap=cmap, center=0, ax=ax,
                 annot_kws={"fontsize": 11}, linewidths=0.5, linecolor="white",
                 xticklabels=False, yticklabels=range(1, nrows + 1),
@@ -1102,7 +1110,7 @@ def plot_candles(ticker, data):
     has_vol = bool("Volume" in data.columns and data["Volume"].fillna(0).sum() > 0)
     fig, _ = mpf.plot(data, type="candle", style="yahoo", volume=has_vol,
                       title=f"{ticker} Candlestick Chart", ylabel="Price",
-                      figsize=(12, 7), returnfig=True, tight_layout=True)
+                      figsize=(16, 7), returnfig=True, tight_layout=True)
     return fig
 
 
