@@ -7,6 +7,7 @@ plain DataFrames / matplotlib Figures; each UI decides how to render them.
 """
 import base64
 import io
+import re
 import math
 import os
 import time
@@ -25,7 +26,7 @@ from matplotlib.colors import LinearSegmentedColormap
 
 HERE = os.path.dirname(os.path.abspath(__file__))
 NIFTY50_CSV = os.path.join(HERE, "ind_nifty50list.csv")
-CALC_VERSION = 5   # bump when calculations change: invalidates Streamlit's cache
+CALC_VERSION = 6   # bump when calculations change: invalidates Streamlit's cache
 MONTHS = ["Jan", "Feb", "Mar", "Apr", "May", "Jun",
           "Jul", "Aug", "Sep", "Oct", "Nov", "Dec"]
 
@@ -266,6 +267,13 @@ def range_stats(names, start, end):
     annualised volatility and % of up days."""
     start_ts = pd.Timestamp(start).normalize()
     closes = download_closes(list(names), start_ts - timedelta(days=14), end)
+    return stats_from_closes(closes, names, start_ts)
+
+
+def stats_from_closes(closes, names, start):
+    """range_stats() maths on an already-downloaded close table
+    (rows = dates, columns = keys of `names`). Shared by Yahoo and NSE tools."""
+    start_ts = pd.Timestamp(start).normalize()
     rows = []
     for sym, nm in names.items():
         w = base_window(closes[sym], start_ts, include_start=False)
@@ -289,6 +297,175 @@ def range_stats(names, start, end):
     df[pct] = df[pct].astype(float).round(2)
     return df.sort_values("Gain (%)", ascending=False,
                           na_position="last").reset_index(drop=True)
+
+
+# ------------------------------------------------- NSE all-indices (EOD file)
+# NSE publishes one CSV per trading day with the close of EVERY NSE index
+# (sectoral, thematic, strategy, broad market, bond). Yahoo only carries a
+# handful of them, so this tool reads NSE's own file instead.
+NSE_INDEX_URLS = [
+    "https://nsearchives.nseindia.com/content/indices/ind_close_all_{}.csv",
+    "https://archives.nseindia.com/content/indices/ind_close_all_{}.csv",   # mirror
+]
+NSE_HEADERS = {
+    "User-Agent": ("Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 "
+                   "(KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36"),
+    "Accept": "text/csv,*/*", "Accept-Language": "en-US,en;q=0.9",
+    "Referer": "https://www.nseindia.com/all-reports",
+}
+NSE_MAX_FULL_DAYS = 100      # longer ranges: fetch only the two end points
+_NSE_DAY_CACHE = {}          # date -> (fetched_at, DataFrame | None)
+_NSE_NUM_COLS = {"Open Index Value": "Open", "High Index Value": "High",
+                 "Low Index Value": "Low", "Closing Index Value": "Close",
+                 "Change(%)": "Day Chg (%)", "P/E": "P/E", "P/B": "P/B",
+                 "Div Yield": "Div Yield"}
+
+NSE_CATEGORIES = ["Sectoral", "Thematic", "Strategy", "Broad market", "Bond / G-Sec", "Volatility"]
+_SECTOR_WORDS = re.compile(
+    r"\b(auto|bank|financial services|fmcg|it|media|metal|pharma|realty|healthcare|"
+    r"consumer durables|oil (?:&|and) gas|chemicals|it & telecom)\b", re.I)
+_BOND_WORDS = re.compile(r"g-?sec|sdl|bond|t-?bill|gilt|\bcorporate\b|\baaa\b|1d rate|"
+                         r"\bgsec\b|\byr\b|\byear\b|money market|overnight", re.I)
+_STRATEGY_WORDS = re.compile(
+    r"alpha|beta|quality|value|momentum|low[ -]?vol|equal weight|dividend|growth|"
+    r"multi.?factor|\bfactor\b|shariah|top \d+|\btri\b|leverage|inverse|arbitrage|"
+    r"\bmq\b|\bqvlv\b|liquid \d+", re.I)
+_BROAD_WORDS = re.compile(
+    r"^nifty ?(50|next 50|100|200|500|midcap|smallcap|microcap|total market|"
+    r"largemidcap|midsmallcap|mid ?small|large ?mid|india 500)|^nifty(100|200|500)?$|"
+    r"midcap|smallcap|microcap|total market", re.I)
+
+
+def nse_category(name):
+    n = str(name)
+    if "vix" in n.lower():
+        return "Volatility"
+    if _BOND_WORDS.search(n):
+        return "Bond / G-Sec"
+    if _STRATEGY_WORDS.search(n):
+        return "Strategy"
+    if _SECTOR_WORDS.search(n) and not re.search(r"midcap|smallcap|next 50", n, re.I) \
+            or re.search(r"midsmall (healthcare|financial services|it & telecom)", n, re.I):
+        return "Sectoral"
+    if _BROAD_WORDS.search(n):
+        return "Broad market"
+    return "Thematic"
+
+
+def _parse_nse_csv(text):
+    # index_col=False: a row with a stray extra field must not shift columns
+    df = pd.read_csv(io.StringIO(text.lstrip("\ufeff")), index_col=False)
+    df.columns = [str(c).strip() for c in df.columns]
+    if "Index Name" not in df.columns or "Closing Index Value" not in df.columns:
+        raise ValueError("unexpected file format")
+    df["Index Name"] = df["Index Name"].astype(str).str.strip()
+    df = df[df["Index Name"].ne("") & df["Index Name"].ne("nan")]
+    out = pd.DataFrame(index=pd.Index(df["Index Name"], name="Index Name"))
+    for src, dst in _NSE_NUM_COLS.items():
+        if src in df.columns:
+            out[dst] = pd.to_numeric(df[src].astype(str).str.replace(",", "").str.strip(),
+                                     errors="coerce").to_numpy()
+    return out[~out.index.duplicated()]
+
+
+def nse_index_day(day, session=None):
+    """All NSE indices for one trading day: DataFrame indexed by index name,
+    None when NSE has no file for that day (holiday, or not published yet).
+    Raises ConnectionError if NSE could not be reached / refused us."""
+    import requests
+    day = pd.Timestamp(day).normalize()
+    now = time.time()
+    hit = _NSE_DAY_CACHE.get(day)
+    if hit is not None:
+        fetched_at, df = hit
+        old_day = (pd.Timestamp(_naive_utc_now()).normalize() - day).days > 4
+        if df is not None or old_day or now - fetched_at < 600:
+            return df
+    if day.weekday() >= 5:                       # weekend: no file, no request
+        _NSE_DAY_CACHE[day] = (now, None)
+        return None
+    http = session or requests
+    last_err = None
+    for url in NSE_INDEX_URLS:
+        try:
+            r = http.get(url.format(day.strftime("%d%m%Y")), headers=NSE_HEADERS, timeout=20)
+        except Exception as e:                   # network error: try the mirror
+            last_err = e
+            continue
+        if r.status_code == 404:
+            _NSE_DAY_CACHE[day] = (now, None)
+            return None
+        if r.status_code == 200 and "Index Name" in r.text[:200]:
+            df = _parse_nse_csv(r.text)
+            _NSE_DAY_CACHE[day] = (now, df)
+            return df
+        last_err = f"HTTP {r.status_code}"
+    raise ConnectionError(f"NSE archives unreachable ({last_err})")
+
+
+def _nse_walk_back(day, limit=12, session=None):
+    """(date, frame) of the latest trading day on or before `day`."""
+    day = pd.Timestamp(day).normalize()
+    for back in range(limit):
+        d = day - timedelta(days=back)
+        df = nse_index_day(d, session)
+        if df is not None:
+            return d, df
+    return None, None
+
+
+def nse_index_stats(start, end, max_full_days=NSE_MAX_FULL_DAYS, workers=6):
+    """range_stats() for EVERY NSE index, from NSE's daily all-indices file.
+
+    Same base rule as the other tools: base = close of the last trading day
+    before `start`. Ranges longer than `max_full_days` weekdays fetch only the
+    base and end days (gain is exact; range high/low, drawdown and volatility
+    are left blank). Adds Category and the latest P/E, P/B and dividend yield."""
+    import requests
+    from concurrent.futures import ThreadPoolExecutor
+    start_ts, end_ts = pd.Timestamp(start).normalize(), pd.Timestamp(end).normalize()
+    session = requests.Session()
+    try:
+        base_day, base_df = _nse_walk_back(start_ts - timedelta(days=1), session=session)
+        days = [d for d in pd.bdate_range(start_ts, end_ts)]
+        quick = len(days) > max_full_days
+        frames = {}
+        if base_df is not None:
+            frames[base_day] = base_df
+        if quick:
+            d, df = _nse_walk_back(end_ts, session=session)
+            if df is not None and d >= start_ts:
+                frames[d] = df
+        else:
+            with ThreadPoolExecutor(max_workers=workers) as ex:
+                for d, df in zip(days, ex.map(lambda d: nse_index_day(d, session), days)):
+                    if df is not None:
+                        frames[d] = df
+    except ConnectionError as e:
+        raise DataUnavailable(
+            "Could not download NSE's index file from nsearchives.nseindia.com "
+            f"({e}). NSE sometimes blocks cloud servers for a few minutes; "
+            "wait a minute and run again.") from None
+    finally:
+        session.close()
+
+    if not frames:
+        return pd.DataFrame(columns=RANGE_COLUMNS + ["Category", "P/E", "P/B", "Div Yield"]), quick
+    closes = pd.DataFrame({d: f["Close"] for d, f in sorted(frames.items())}).T
+    closes.index = pd.DatetimeIndex(closes.index)
+    names = {c: c for c in closes.columns}
+    out = stats_from_closes(closes, names, start_ts)
+    if quick:
+        out[["Range High", "Range Low", "Off High (%)", "Max Drawdown (%)",
+             "Volatility (%)", "Up Days (%)"]] = np.nan
+    latest = frames[max(frames)]
+    out["Category"] = [nse_category(n) for n in out["Name"]]
+    for c in ("P/E", "P/B", "Div Yield"):
+        out[c] = out["Name"].map(latest[c]) if c in latest else np.nan
+    out = out.drop(columns=["Symbol"]).rename(columns={"Base Price": "Base Value",
+                                                       "Last Price": "Last Value"})
+    out = out[["Name", "Category"] + [c for c in out.columns if c not in ("Name", "Category")]]
+    return out, quick
 
 
 def range_gains(names, start, end):
@@ -496,11 +673,13 @@ def plot_gain_grid(df, title, ncols=5):
     nrows = math.ceil(len(valid) / ncols)
     pad = nrows * ncols - len(valid)
     gains = np.append(valid["Gain (%)"].to_numpy(float), [np.nan] * pad).reshape(nrows, ncols)
-    labels = [f"{n}\n{g:.1f}%" for n, g in zip(valid["Name"], valid["Gain (%)"])]
+    import textwrap
+    labels = [f"{textwrap.fill(str(n), 16)}\n{g:.1f}%"
+              for n, g in zip(valid["Name"], valid["Gain (%)"])]
     annot = np.array(labels + [""] * pad, dtype=object).reshape(nrows, ncols)
 
     cmap = LinearSegmentedColormap.from_list("rg", ["red", "white", "green"], N=256)
-    fig, ax = plt.subplots(figsize=(14, 1.4 * nrows + 2))
+    fig, ax = plt.subplots(figsize=(14, 1.6 * nrows + 2))
     sns.heatmap(gains, annot=annot, fmt="", cmap=cmap, center=0, ax=ax,
                 annot_kws={"fontsize": 11}, linewidths=0.5, linecolor="white",
                 xticklabels=False, yticklabels=range(1, nrows + 1),
