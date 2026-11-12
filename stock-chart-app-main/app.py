@@ -26,7 +26,7 @@ from matplotlib.colors import LinearSegmentedColormap
 
 HERE = os.path.dirname(os.path.abspath(__file__))
 NIFTY50_CSV = os.path.join(HERE, "ind_nifty50list.csv")
-CALC_VERSION = 7   # bump when calculations change: invalidates Streamlit's cache
+CALC_VERSION = 8   # bump when calculations change: invalidates Streamlit's cache
 MONTHS = ["Jan", "Feb", "Mar", "Apr", "May", "Jun",
           "Jul", "Aug", "Sep", "Oct", "Nov", "Dec"]
 
@@ -414,6 +414,143 @@ def _nse_walk_back(day, limit=12, session=None):
     return None, None
 
 
+# ------------------------------------------------------ today's live values
+NSE_LIVE_URL = "https://www.nseindia.com/api/allIndices"
+# Yahoo symbols for NSE indices, used only if NSE's live feed is blocked.
+YAHOO_FOR_NSE = {
+    "Nifty 50": "^NSEI", "Nifty Bank": "^NSEBANK", "Nifty IT": "^CNXIT",
+    "Nifty Auto": "^CNXAUTO", "Nifty Pharma": "^CNXPHARMA", "Nifty FMCG": "^CNXFMCG",
+    "Nifty Metal": "^CNXMETAL", "Nifty Realty": "^CNXREALTY", "Nifty Media": "^CNXMEDIA",
+    "Nifty Energy": "^CNXENERGY", "Nifty PSU Bank": "^CNXPSUBANK", "Nifty Infrastructure": "^CNXINFRA",
+    "Nifty Commodities": "^CNXCMDT", "Nifty PSE": "^CNXPSE", "Nifty MNC": "^CNXMNC",
+    "Nifty India Consumption": "^CNXCONSUM", "Nifty Services Sector": "^CNXSERVICE",
+    "Nifty Private Bank": "NIFTY_PVT_BANK.NS", "Nifty Financial Services": "NIFTY_FIN_SERVICE.NS",
+    "Nifty Midcap 100": "NIFTY_MIDCAP_100.NS", "Nifty Consumer Durables": "NIFTY_CONSR_DURBL.NS",
+}
+
+
+def _today_ist():
+    return datetime.now(timezone(timedelta(hours=5, minutes=30))).date()
+
+
+def _norm_index_name(n):
+    """'NIFTY FINANCIAL SERVICES 25/50' and 'Nifty Financial Services 25/50' -> same key."""
+    return re.sub(r"[^a-z0-9]", "", str(n).lower())
+
+
+def _num(v):
+    try:
+        f = float(str(v).replace(",", "").strip())
+        return f if f > 0 else np.nan
+    except (TypeError, ValueError):
+        return np.nan
+
+
+def nse_live_snapshot(today=None):
+    """Today's live/latest value of every NSE index.
+
+    Returns (frame, info). `frame` is indexed by normalised index name with
+    Close (= last traded value), P/E, P/B, Div Yield; None if nothing usable.
+    `info` = {"source": "NSE live"|"Yahoo"|None, "as_of": str, "count": n, "error": str}.
+    1) NSE's own live feed (all indices; often blocked from cloud servers).
+    2) Yahoo for the ~20 indices it carries.
+    Values are used only if they are stamped with today's date."""
+    import requests
+    today = today or _today_ist()
+    info = {"source": None, "as_of": "", "count": 0, "error": ""}
+    # 1) NSE live feed: needs cookies from the home page first
+    try:
+        with requests.Session() as sess:
+            sess.headers.update({**NSE_HEADERS, "Accept": "application/json, text/plain, */*",
+                                 "Referer": "https://www.nseindia.com/market-data/live-market-indices"})
+            sess.get("https://www.nseindia.com", timeout=8)
+            r = sess.get(NSE_LIVE_URL, timeout=10)
+        if r.status_code != 200:
+            raise ConnectionError(f"HTTP {r.status_code}")
+        payload = r.json()
+        stamp = pd.to_datetime(payload.get("timestamp", ""), format="%d-%b-%Y %H:%M", errors="coerce")
+        if pd.isna(stamp) or stamp.date() != today:
+            info["error"] = f"NSE live feed is not for today (stamped {payload.get('timestamp')})"
+        else:
+            rows = {}
+            for row in payload.get("data", []):
+                close = _num(row.get("last"))
+                if np.isnan(close):
+                    continue
+                rows[_norm_index_name(row.get("index") or row.get("indexSymbol"))] = {
+                    "Close": close, "P/E": _num(row.get("pe")), "P/B": _num(row.get("pb")),
+                    "Div Yield": _num(row.get("dy"))}
+            if rows:
+                info.update(source="NSE live", as_of=f"{stamp:%H:%M} IST", count=len(rows))
+                return pd.DataFrame.from_dict(rows, orient="index"), info
+            info["error"] = "NSE live feed returned no index values"
+    except Exception as e:                       # blocked / timeout / not JSON
+        info["error"] = f"NSE live feed unavailable ({str(e)[:80]})"
+    # 2) Yahoo fallback for the indices it carries
+    try:
+        syms = list(YAHOO_FOR_NSE.values())
+        closes = download_closes(syms, pd.Timestamp(today) - timedelta(days=6), today,
+                                 retry_wait=1.0)
+        today_rows = closes[closes.index.normalize() == pd.Timestamp(today)]
+        if not today_rows.empty:
+            last = today_rows.iloc[-1]
+            rows = {_norm_index_name(nm): {"Close": last[sym]}
+                    for nm, sym in YAHOO_FOR_NSE.items() if pd.notna(last[sym])}
+            if rows:
+                info.update(source="Yahoo", as_of="delayed ~15 min", count=len(rows))
+                return pd.DataFrame.from_dict(rows, orient="index"), info
+        info["error"] += "; Yahoo has no values for today yet"
+    except Exception as e:
+        info["error"] += f"; Yahoo fallback failed ({str(e)[:60]})"
+    return None, info
+
+
+def _add_live_today(frames, columns, end_day):
+    """If `end_day` is today (a weekday) and NSE's file for today is not out yet,
+    add a frame of today's live values for the matching index names.
+    Returns info dict (empty when live data was not needed)."""
+    today = pd.Timestamp(_today_ist())
+    if pd.Timestamp(end_day).normalize() < today or today.weekday() >= 5 or today in frames:
+        return {}
+    live, info = nse_live_snapshot(today.date())
+    if live is None:
+        return info
+    key_of = {_norm_index_name(c): c for c in columns}
+    live = live[live.index.isin(key_of)].rename(index=key_of)
+    # Sanity guard: drop values more than 20% away from the last published
+    # close (wrong/stale symbol); real one-day index moves are far smaller.
+    prev_day = max((d for d in frames if d < today), default=None)
+    if prev_day is not None and not live.empty:
+        prev = frames[prev_day]["Close"].reindex(live.index)
+        ratio = live["Close"] / prev
+        matched = len(live)
+        live = live[ratio.isna() | ratio.between(0.8, 1.2)]
+        if matched and live.empty:
+            info.update(source=None, error=f"{info['source']} values looked wrong "
+                        "(over 20% away from the last close), so they were ignored")
+            return info
+    if live.empty:
+        info["error"] = "live index names did not match NSE's file"
+        info["source"] = None
+        return info
+    info["count"], info["total"] = len(live), len(columns)
+    frames[today] = live
+    return info
+
+
+def _fundamentals(frames, names):
+    """Latest P/E, P/B, Div Yield per index (live values when present,
+    otherwise the latest end-of-day file that has them)."""
+    out = pd.DataFrame(index=names, columns=["P/E", "P/B", "Div Yield"], dtype=float)
+    for d in sorted(frames):                       # later days overwrite earlier
+        f = frames[d]
+        for c in out.columns:
+            if c in f:
+                vals = f[c].reindex(names)
+                out[c] = vals.where(vals.notna(), out[c])
+    return out
+
+
 def nse_index_stats(start, end, max_full_days=NSE_MAX_FULL_DAYS, workers=6):
     """range_stats() for EVERY NSE index, from NSE's daily all-indices file.
 
@@ -450,7 +587,10 @@ def nse_index_stats(start, end, max_full_days=NSE_MAX_FULL_DAYS, workers=6):
         session.close()
 
     if not frames:
-        return pd.DataFrame(columns=RANGE_COLUMNS + ["Category", "P/E", "P/B", "Div Yield"]), quick
+        return (pd.DataFrame(columns=RANGE_COLUMNS + ["Category", "P/E", "P/B", "Div Yield"]),
+                {"quick": quick, "live": {}})
+    all_names = sorted(set().union(*[f.index for f in frames.values()]))
+    live_info = _add_live_today(frames, all_names, end_ts)
     closes = pd.DataFrame({d: f["Close"] for d, f in sorted(frames.items())}).T
     closes.index = pd.DatetimeIndex(closes.index)
     names = {c: c for c in closes.columns}
@@ -458,14 +598,14 @@ def nse_index_stats(start, end, max_full_days=NSE_MAX_FULL_DAYS, workers=6):
     if quick:
         out[["Range High", "Range Low", "Off High (%)", "Max Drawdown (%)",
              "Volatility (%)", "Up Days (%)"]] = np.nan
-    latest = frames[max(frames)]
+    fund = _fundamentals(frames, list(out["Name"]))
     out["Category"] = [nse_category(n) for n in out["Name"]]
     for c in ("P/E", "P/B", "Div Yield"):
-        out[c] = out["Name"].map(latest[c]) if c in latest else np.nan
+        out[c] = out["Name"].map(fund[c])
     out = out.drop(columns=["Symbol"]).rename(columns={"Base Price": "Base Value",
                                                        "Last Price": "Last Value"})
     out = out[["Name", "Category"] + [c for c in out.columns if c not in ("Name", "Category")]]
-    return out, quick
+    return out, {"quick": quick, "live": live_info}
 
 
 def nse_index_returns(reference_date=None, durations=(30, 60, 90), workers=6):
@@ -493,6 +633,8 @@ def nse_index_returns(reference_date=None, durations=(30, 60, 90), workers=6):
     if not frames:
         raise DataUnavailable("NSE returned no index files for the last "
                               f"{max(durations)} days; try again later.")
+    all_names = sorted(set().union(*[f.index for f in frames.values()]))
+    live_info = _add_live_today(frames, all_names, ref)
     closes = pd.DataFrame({d: f["Close"] for d, f in sorted(frames.items())}).T
     closes.index = pd.DatetimeIndex(closes.index)
     latest_day = max(frames)
@@ -500,11 +642,11 @@ def nse_index_returns(reference_date=None, durations=(30, 60, 90), workers=6):
     df = df.rename(columns={"Last Price": "Last Value"})
     df.insert(0, "Name", df.index)
     df.insert(1, "Category", [nse_category(n) for n in df.index])
-    latest = frames[latest_day]
+    fund = _fundamentals(frames, list(df["Name"]))
     for c in ("P/E", "P/B", "Div Yield"):
-        df[c] = df["Name"].map(latest[c]) if c in latest else np.nan
+        df[c] = df["Name"].map(fund[c])
     df.index.name = "Index"
-    return df, latest_day.date()
+    return df, {"last_day": latest_day.date(), "live": live_info}
 
 
 def range_gains(names, start, end):
