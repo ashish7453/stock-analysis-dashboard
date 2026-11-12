@@ -103,6 +103,8 @@ def show_chart(fig):
     """Show a chart: Plotly figures interactively (full width, fixed height that
     fits the screen, following the app's light/dark theme); anything else via show_fig."""
     if hasattr(fig, "to_plotly_json"):
+        dark = (getattr(st.context.theme, "type", None) or "light") == "dark"
+        charts.apply_ink(fig, "#ffffff" if dark else "#000000")
         st.plotly_chart(fig, width="stretch", theme="streamlit", config=PLOTLY_CONFIG)
     else:
         show_fig(fig)
