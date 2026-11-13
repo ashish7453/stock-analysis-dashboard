@@ -236,3 +236,79 @@ def _range(lo, hi, pad):
     value is negative (so labels sit close to the bars)."""
     span = max(abs(lo), abs(hi)) or 1.0
     return [lo - span * pad if lo < 0 else 0, hi + span * pad if hi > 0 else 0]
+
+
+# --------------------------------------------------------------- social posts
+SOCIAL_SIZES = {          # name -> (width, height) of the final image in pixels
+    "Instagram square (1080×1080)": (1080, 1080),
+    "Instagram portrait (1080×1350)": (1080, 1350),
+    "Instagram story (1080×1920)": (1080, 1920),
+}
+
+
+def _sideways_bars(fig, h):
+    """A long single-series column chart (e.g. 50 stocks) turned into
+    horizontal bars, best at the top, so each name gets a readable row on a
+    phone-shaped image. If there are more rows than fit, the middle is
+    dropped and the top and bottom performers are kept. Returns
+    (figure, note) where note says what was left out."""
+    tr = fig.data[0]
+    names, vals = list(tr.x), [float(v) for v in tr.y]
+    colors = list(tr.marker.color) if tr.marker.color is not None else None
+    hov = list(tr.customdata) if tr.customdata is not None else [""] * len(names)
+    fit = max(10, int((h - 150) / 15))           # rows that stay readable
+    idx, note = list(range(len(names))), ""
+    if len(names) > fit:
+        k = fit // 2
+        idx = idx[:k] + idx[-k:]
+        note = f"Top {k} and bottom {k} of {len(names)}"
+    rows = len(idx)
+    fs = int(min(13, max(9, (h - 150) / rows * 0.62)))
+    new = go.Figure(go.Bar(
+        y=[names[i] for i in idx], x=[vals[i] for i in idx], orientation="h",
+        marker_color=[colors[i] for i in idx] if colors else None, marker_line_width=0,
+        text=[f"{vals[i]:+.2f}%" for i in idx], textposition="outside", cliponaxis=False,
+        textfont=dict(size=fs), customdata=[hov[i] for i in idx],
+        hovertemplate="<b>%{y}</b><br>Gain %{x:+.2f}%<br>%{customdata}<extra></extra>"))
+    lo, hi = min(0, min(vals)), max(0, max(vals))
+    new.update_xaxes(ticksuffix="%", zeroline=True, zerolinewidth=1.5, range=_range(lo, hi, 0.3))
+    new.update_yaxes(autorange="reversed", type="category", tickfont=dict(size=fs))
+    new.update_layout(title=fig.layout.title, font=fig.layout.font, bargap=0.2, showlegend=False)
+    return new, note
+
+
+def social_layout(fig, width, height, footer=None, scale=2):
+    """Re-lay a chart out for a fixed-size image post: drawn at width/scale x
+    height/scale screen pixels (saved at `scale`x, so text stays readable),
+    white background, black text, the dates and `footer` (e.g. the website)
+    on a second title line, colour bar along the bottom. Long column charts
+    become horizontal bars. Returns the figure to show (may be a new one)."""
+    w, h = width // scale, height // scale
+    note = ""
+    bars = [t for t in fig.data if t.type == "bar"]
+    if (len(fig.data) == 1 and bars and (bars[0].orientation or "v") == "v"
+            and len(bars[0].x) > 12):
+        fig, note = _sideways_bars(fig, h)
+    title = fig.layout.title.text or ""
+    head, tail = (title.split(": ", 1) if ": " in title and "<br>" not in title
+                  else (title, ""))
+    sub = "  ·  ".join(x for x in (tail, note, footer) if x)
+    title = f"<b>{head}</b>" + (f"<br><span style='font-size:13px'>{sub}</span>" if sub else "")
+    fig.update_layout(
+        width=w, height=h, autosize=False,
+        title=dict(text=title, x=0.5, xanchor="center", font=dict(size=17)),
+        paper_bgcolor="white", plot_bgcolor="white",
+        margin=dict(l=12, r=16, t=88, b=14),
+        legend=dict(orientation="h", y=-0.08, x=0.5, xanchor="center", yanchor="top"))
+    fig.update_xaxes(automargin=True, gridcolor="#e5e5e5", zerolinecolor="#bbbbbb")
+    fig.update_yaxes(automargin=True, gridcolor="#e5e5e5", zerolinecolor="#bbbbbb")
+    apply_ink(fig, "#000000")
+    for tr in fig.data:
+        bar = (tr.marker.colorbar if tr.type == "treemap" else
+               tr.colorbar if tr.type == "heatmap" else None)
+        if bar is not None:
+            below = 0.0 if tr.type == "treemap" else 0.09   # heatmap: under the month names
+            bar.update(orientation="h", y=-below, yanchor="top", x=0.5, xanchor="center",
+                       len=0.6, thickness=10, title=dict(side="top"))
+            fig.update_layout(margin_b=60 if tr.type == "treemap" else 90)
+    return fig
