@@ -315,8 +315,9 @@ def show_ranking_results(df, key, chart_title, name_fmt=None, index=True):
     else:
         show_chart(fig)
     st.dataframe(df, width="stretch", hide_index=not index, column_config=column_config(df))
-    st.caption("30D % = latest close vs the close 30 days ago (or the last trading "
-               "day before that, if it was a holiday); same for 60D and 90D. "
+    st.caption("30D % = close on Last Date vs the close on 30D Base Date (30 days "
+               "earlier, or the last trading day before that if it was a holiday); "
+               "same for 60D and 90D. "
                "Rank 1 = best return in that window. 'Off 90D High' = how far the "
                "last close is below the highest close of the last 90 days.")
     download_buttons(df, f"{key}_{today_ist()}", key, index=index)
