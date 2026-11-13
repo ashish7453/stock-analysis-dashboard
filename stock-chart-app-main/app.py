@@ -28,7 +28,7 @@ HERE = os.path.dirname(os.path.abspath(__file__))
 NIFTY50_CSV = os.path.join(HERE, "ind_nifty50list.csv")
 NASDAQ100_CSV = os.path.join(HERE, "nasdaq100_list.csv")
 DOW30_CSV = os.path.join(HERE, "dow30_list.csv")
-CALC_VERSION = 10   # bump when calculations change: invalidates Streamlit's cache
+CALC_VERSION = 11   # bump when calculations change: invalidates Streamlit's cache
 MONTHS = ["Jan", "Feb", "Mar", "Apr", "May", "Jun",
           "Jul", "Aug", "Sep", "Oct", "Nov", "Dec"]
 
@@ -1160,7 +1160,7 @@ def compute_index_returns(names, durations=(30, 60, 90), reference_date=None):
     # 14 extra days so the base close exists even after long holidays
     closes = download_closes(list(names), ref - timedelta(days=max(durations) + 14), ref)
 
-    df = window_returns(closes, ref, durations).drop(columns=["Last Date"])
+    df = window_returns(closes, ref, durations)
     df.insert(0, "Name", [names[s] for s in df.index])
     df.index.name = "Symbol"
     return rank_returns(df, durations)
@@ -1169,15 +1169,19 @@ def compute_index_returns(names, durations=(30, 60, 90), reference_date=None):
 def window_returns(closes, ref, durations=(30, 60, 90)):
     """Unranked 30/60/90-day returns for every column of a close table.
     Base for each window = close on (ref - d days), or the last trading day
-    before it. Columns: d D %, Last Price, Off <max>D High %."""
+    before it. Columns: d D %, Last Price, Last Date, d D Base Date (the
+    close each window's gain is measured from), Off <max>D High %."""
     ref = pd.Timestamp(ref).normalize()
     hi_col = f"Off {max(durations)}D High %"
     rows = {}
     for col in closes.columns:
         s = closes[col].dropna()
         s = s[s.index < ref + timedelta(days=1)]
-        row = {f"{d}D %": period_gain(base_window(s, ref - timedelta(days=d)))
-               for d in durations}
+        row = {}
+        for d in durations:
+            w = base_window(s, ref - timedelta(days=d))
+            row[f"{d}D %"] = period_gain(w)
+            row[f"{d}D Base Date"] = w.index[0].date() if len(w) > 1 else None
         win = base_window(s, ref - timedelta(days=max(durations)))
         row["Last Price"] = win.iloc[-1] if len(win) else np.nan
         row["Last Date"] = win.index[-1].date() if len(win) else None
@@ -1206,7 +1210,8 @@ def rank_returns(df, durations=(30, 60, 90)):
     out = pd.concat([ok, bad]) if not bad.empty else ok
     out[ret_cols + [hi_col]] = out[ret_cols + [hi_col]].round(2)
     order = (["Name", "Category"] + ret_cols + [c for c in out.columns if c.startswith("Rank")]
-             + ["Sum of Ranks", "Last Price", "Last Value", hi_col])
+             + ["Sum of Ranks", "Last Price", "Last Value", "Last Date"]
+             + [f"{d}D Base Date" for d in durations] + [hi_col])
     extra = [c for c in out.columns if c not in order]
     out = out[[c for c in order if c in out.columns] + extra]
     return out
