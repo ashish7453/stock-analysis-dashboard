@@ -95,13 +95,30 @@ def cached_ohlc(ticker: str, start: str, end: str):
 
 
 # ------------------------------------------------------------------- helpers
+CHART_SIZES = ["Fit page"] + list(charts.SOCIAL_SIZES)
 PLOTLY_CONFIG = {"displaylogo": False, "scrollZoom": False,
                  "modeBarButtonsToRemove": ["lasso2d", "select2d", "autoScale2d"]}
 
 
+SOCIAL_FOOTER = "rscreener.com"   # small text at the bottom of Instagram-size charts
+
+
 def show_chart(fig):
     """Show a chart: Plotly figures interactively (full width, fixed height that
-    fits the screen, following the app's light/dark theme); anything else via show_fig."""
+    fits the screen, following the app's light/dark theme); anything else via show_fig.
+    With an Instagram size chosen at the top, the chart is drawn at that shape
+    and the camera button saves a PNG of exactly that size."""
+    size = st.session_state.get("chart_size", CHART_SIZES[0])
+    if hasattr(fig, "to_plotly_json") and size in charts.SOCIAL_SIZES:
+        w, h = charts.SOCIAL_SIZES[size]
+        fig = charts.social_layout(fig, w, h, footer=SOCIAL_FOOTER)
+        name = re.sub(r"[^a-z0-9]+", "-", re.sub(r"<[^>]+>", " ", fig.layout.title.text or "chart").lower()).strip("-")
+        config = dict(PLOTLY_CONFIG, displayModeBar=True,
+                      toImageButtonOptions={"format": "png", "filename": name[:80] or "chart",
+                                            "width": w // 2, "height": h // 2, "scale": 2})
+        st.caption(f"📷 Click the camera icon at the top-right of the chart to save a {w}×{h} PNG.")
+        st.plotly_chart(fig, width="content", theme=None, config=config)
+        return
     if hasattr(fig, "to_plotly_json"):
         dark = (getattr(st.context.theme, "type", None) or "light") == "dark"
         charts.apply_ink(fig, "#ffffff" if dark else "#000000")
@@ -784,9 +801,12 @@ _by_slug["nifty-50-performance"] = "🇮🇳 Nifty 50 Stock Performance"   # old
 _names = list(PAGES)
 _wanted = _by_slug.get(str(st.query_params.get("tool", "")).lower(), _names[0])
 
-c1, c2 = st.columns([2, 3], vertical_alignment="bottom")
+c1, c2, c3 = st.columns([2, 1.3, 1.7], vertical_alignment="bottom")
 choice = c1.selectbox("Tool", _names, index=_names.index(_wanted), key="tool")
-c2.caption(DATA_SOURCE)
+c2.selectbox("Chart size", CHART_SIZES, key="chart_size",
+             help="Pick an Instagram size to draw charts in that shape and download "
+                  "them as a PNG ready to post.")
+c3.caption(DATA_SOURCE)
 if _slug(choice) != st.query_params.get("tool"):
     st.query_params["tool"] = _slug(choice)
 st.divider()
