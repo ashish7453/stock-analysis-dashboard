@@ -178,7 +178,7 @@ def missing_note(df, col, source="Yahoo"):
 
 
 # ======================================================= date-range tool body
-def _range_body(key, title, names, p, views, price_fmt, unit_note):
+def _range_body(key, title, names, p, views, price_fmt, unit_note, table_fmt=None):
     fetch = live_range_stats if p["live"] else cached_range_stats
     with st.spinner(f"Fetching {len(names)} symbols..."):
         try:
@@ -191,12 +191,14 @@ def _range_body(key, title, names, p, views, price_fmt, unit_note):
                    f"{datetime.now(IST):%H:%M:%S} IST")
     if unit_note:
         st.info(unit_note, icon="ℹ️")
-    show_range_results(df, key, title, p, views, price_fmt)
+    show_range_results(df, key, title, p, views, price_fmt, table_fmt=table_fmt)
 
 
 def show_range_results(df, key, title, p, views, price_fmt="%.2f", source="Yahoo Finance",
-                       name_fmt=None, live=None):
-    """Summary line, metrics, chart, table and downloads for a range_stats frame."""
+                       name_fmt=None, live=None, table_fmt=None):
+    """Summary line, metrics, chart, table and downloads for a range_stats frame.
+    `table_fmt` (optional) reshapes the frame for the table and downloads only,
+    e.g. full company names; charts keep the short labels."""
     v = df.dropna(subset=["Gain (%)"])
     req_start, req_end = pd.Timestamp(p["start"]).date(), pd.Timestamp(p["end"]).date()
     if v.empty:
@@ -224,6 +226,8 @@ def show_range_results(df, key, title, p, views, price_fmt="%.2f", source="Yahoo
     else:
         show_chart(fig)
 
+    if table_fmt is not None:
+        df = table_fmt(df)
     st.dataframe(df, width="stretch", hide_index=True,
                  column_config=column_config(df, price_fmt))
     st.caption("Gain = close on the end date vs the close of the trading day "
@@ -240,7 +244,7 @@ _range_live = st.fragment(run_every=LIVE_EVERY)(_range_body)
 
 
 def range_tool(key, title, names, views, button,
-               price_fmt="%.2f", unit_note=None, extra=None):
+               price_fmt="%.2f", unit_note=None, extra=None, table_fmt=None):
     """Generic 'performance between two dates' page."""
     st.header(title)
     if extra:
@@ -257,7 +261,7 @@ def range_tool(key, title, names, views, button,
     p = st.session_state.get(key)
     if p:
         (_range_live if p["live"] else _range_static)(
-            key, title, names, p, views, price_fmt, unit_note)
+            key, title, names, p, views, price_fmt, unit_note, table_fmt)
 
 
 # ================================================== 30/60/90-day ranking body
@@ -533,14 +537,28 @@ def cached_constituents(list_key: str, version: int = core.CALC_VERSION):
 def stock_list_page(list_key, title, button, unit_note=None):
     """Performance of every stock in an index over a date range: market map
     grouped by industry/sector, ranked bars, table (Nifty 50, Nasdaq-100, Dow 30)."""
-    cons, src = cached_constituents(list_key, version=core.CALC_VERSION)
+    try:
+        cons, src = cached_constituents(list_key, version=core.CALC_VERSION)
+    except core.DataUnavailable as e:
+        st.title(title)
+        st.error(str(e))
+        return
     names = dict(zip(cons["Yahoo"], cons["Symbol"]))
     industry = dict(zip(cons["Symbol"], cons["Industry"]))
     views = {"Market map": lambda d, t: charts.market_map(d.assign(Industry=d["Name"].map(industry)),
                                                           t, group_col="Industry"),
              "Ranked bars": charts.ranked_bars}
+    company = dict(zip(cons["Symbol"], cons["Company Name"]))
+
+    def with_company(d):
+        # Table: Name = company name, Symbol = plain ticker (no ".NS").
+        d = d.copy()
+        d["Symbol"] = d["Name"]
+        d["Name"] = d["Name"].map(company).fillna(d["Name"])
+        return d
+
     range_tool(list_key, title, names, views, button, unit_note=unit_note,
-               extra=f"{len(names)} stocks · members: {src}.")
+               extra=f"{len(names)} stocks · members: {src}.", table_fmt=with_company)
 
 
 def page_nifty50():
