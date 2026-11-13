@@ -48,6 +48,21 @@ def _base_layout(fig, title, height):
 
 
 # --------------------------------------------------------------- market map
+def _wrap(text, width=14):
+    """Break a long tile label into lines of about `width` characters so it
+    fits narrow tiles (e.g. 'India Manufacturing' -> 'India<br>Manufacturing')."""
+    if len(text) <= width:
+        return text
+    lines, cur = [], ""
+    for w in text.split():
+        if cur and len(cur) + 1 + len(w) > width:
+            lines.append(cur); cur = w
+        else:
+            cur = f"{cur} {w}".strip()
+    lines.append(cur)
+    return "<br>".join(lines)
+
+
 def market_map(df, title, group_col=None, value_col="Gain (%)", height=620):
     """Finviz-style treemap: one tile per row, coloured red -> green by gain,
     optionally grouped (e.g. by industry or category). Group tiles show the
@@ -68,7 +83,7 @@ def market_map(df, title, group_col=None, value_col="Gain (%)", height=620):
             hovers.append(f"{len(members)} members · average {avg:+.2f}%<br>"
                           f"best {members[value_col].max():+.2f}% · worst {members[value_col].min():+.2f}%")
     for _, r in d.iterrows():
-        ids.append(f"l::{r['Name']}"); labels.append(str(r["Name"]))
+        ids.append(f"l::{r['Name']}"); labels.append(_wrap(str(r["Name"])))
         parents.append(f"g::{r[group_col]}" if grouped else "")
         values.append(1); colors.append(float(np.clip(r[value_col], -lim, lim)))
         texts.append(f"{r[value_col]:+.2f}%")
@@ -86,7 +101,8 @@ def market_map(df, title, group_col=None, value_col="Gain (%)", height=620):
         tiling=dict(pad=2), pathbar=dict(visible=grouped), maxdepth=3,
         sort=False,
     ))
-    fig.update_layout(uniformtext=dict(minsize=10, mode="hide"))
+    # No "hide" mode: Plotly then shrinks a label to fit its tile instead of
+    # leaving the tile blank. Long names are wrapped so they stay readable.
     return _base_layout(fig, title, height)
 
 
