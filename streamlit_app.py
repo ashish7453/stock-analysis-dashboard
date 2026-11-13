@@ -111,8 +111,8 @@ def show_chart(fig):
     size = st.session_state.get("chart_size", CHART_SIZES[0])
     if hasattr(fig, "to_plotly_json") and size in charts.SOCIAL_SIZES:
         w, h = charts.SOCIAL_SIZES[size]
-        fig = charts.social_layout(fig, w, h, footer=SOCIAL_FOOTER)
         name = re.sub(r"[^a-z0-9]+", "-", re.sub(r"<[^>]+>", " ", fig.layout.title.text or "chart").lower()).strip("-")
+        fig = charts.social_layout(fig, w, h, footer=SOCIAL_FOOTER)
         config = dict(PLOTLY_CONFIG, displayModeBar=True,
                       toImageButtonOptions={"format": "png", "filename": name[:80] or "chart",
                                             "width": w // 2, "height": h // 2, "scale": 2})
