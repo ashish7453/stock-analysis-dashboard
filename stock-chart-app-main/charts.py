@@ -299,7 +299,20 @@ def social_layout(fig, width, height, footer=None, scale=2):
         title=dict(text=title, x=0.5, xanchor="center", font=dict(size=17)),
         paper_bgcolor="white", plot_bgcolor="white",
         margin=dict(l=12, r=16, t=88, b=14),
-        legend=dict(orientation="h", y=-0.08, x=0.5, xanchor="center", yanchor="top"))
+        # Legend just under the title, so it never collides with x-axis labels.
+        legend=dict(orientation="h", y=1.0, x=0.5, xanchor="center", yanchor="bottom",
+                    font=dict(size=12)))
+    named = [t for t in fig.data if t.name and t.showlegend is not False]
+    if len(named) > 1 and fig.layout.showlegend is not False:
+        fig.update_layout(margin_t=112)
+    else:
+        fig.update_layout(showlegend=False)      # one entry adds nothing
+    # Grouped bars with long category names: wrap the names so neighbours
+    # don't run into each other on the narrow image.
+    if len(bars) > 1 and all((t.orientation or "v") == "v" for t in bars):
+        for t in fig.data:
+            if t.type == "bar" and t.x is not None:
+                t.x = [_wrap(str(v), 12) for v in t.x]
     fig.update_xaxes(automargin=True, gridcolor="#e5e5e5", zerolinecolor="#bbbbbb")
     fig.update_yaxes(automargin=True, gridcolor="#e5e5e5", zerolinecolor="#bbbbbb")
     apply_ink(fig, "#000000")
