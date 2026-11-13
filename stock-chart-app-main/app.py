@@ -157,14 +157,159 @@ def _yahoo_symbol(ticker, suffix):
     return t + suffix if suffix else t.replace(".", "-")
 
 
+# Built-in copies of the member lists, used when neither Wikipedia nor the
+# CSV file is available (e.g. the CSV was not uploaded with the app).
+EMBEDDED_LISTS = {
+    "nasdaq100": """Company Name,Industry,Symbol
+Adobe Inc.,Technology,ADBE
+Advanced Micro Devices,Technology,AMD
+Airbnb,Consumer Discretionary,ABNB
+Alnylam Pharmaceuticals,Health Care,ALNY
+Alphabet Inc. (Class A),Technology,GOOGL
+Alphabet Inc. (Class C),Technology,GOOG
+Amazon,Consumer Discretionary,AMZN
+American Electric Power,Utilities,AEP
+Amgen,Health Care,AMGN
+Analog Devices,Technology,ADI
+Apple Inc.,Technology,AAPL
+Applied Materials,Technology,AMAT
+AppLovin,Technology,APP
+Arm Holdings,Technology,ARM
+ASML Holding,Technology,ASML
+Astera Labs,Technology,ALAB
+Autodesk,Technology,ADSK
+Automatic Data Processing,Industrials,ADP
+Axon Enterprise,Industrials,AXON
+Baker Hughes,Energy,BKR
+Booking Holdings,Consumer Discretionary,BKNG
+Broadcom,Technology,AVGO
+Cadence Design Systems,Technology,CDNS
+Cintas,Industrials,CTAS
+Cisco,Telecommunications,CSCO
+Coca-Cola Europacific Partners,Consumer Staples,CCEP
+Comcast,Telecommunications,CMCSA
+Constellation Energy,Utilities,CEG
+Copart,Consumer Discretionary,CPRT
+CoreWeave,Technology,CRWV
+Costco,Consumer Discretionary,COST
+CrowdStrike,Technology,CRWD
+CSX Corporation,Industrials,CSX
+Datadog,Technology,DDOG
+DexCom,Health Care,DXCM
+Diamondback Energy,Energy,FANG
+DoorDash,Technology,DASH
+Exelon,Utilities,EXC
+Fastenal,Industrials,FAST
+Ferrovial,Industrials,FER
+Fortinet,Technology,FTNT
+GE HealthCare,Health Care,GEHC
+Gilead Sciences,Health Care,GILD
+Honeywell Aerospace,Industrials,HONA
+Honeywell Technologies,Industrials,HON
+Idexx Laboratories,Health Care,IDXX
+Intel,Technology,INTC
+Intuit,Technology,INTU
+Intuitive Surgical,Health Care,ISRG
+Keurig Dr Pepper,Consumer Staples,KDP
+KLA Corporation,Technology,KLAC
+Lam Research,Technology,LRCX
+Linde plc,Basic Materials,LIN
+Lumentum,Technology,LITE
+Marriott International,Consumer Discretionary,MAR
+Marvell Technology,Technology,MRVL
+Mercado Libre,Consumer Discretionary,MELI
+Meta Platforms,Technology,META
+Microchip Technology,Technology,MCHP
+Micron Technology,Technology,MU
+Microsoft,Technology,MSFT
+MicroStrategy,Technology,MSTR
+Mondelez International,Consumer Staples,MDLZ
+Monolithic Power Systems,Technology,MPWR
+Monster Beverage,Consumer Staples,MNST
+Nebius Group,Technology,NBIS
+"Netflix, Inc.",Consumer Discretionary,NFLX
+Nvidia,Technology,NVDA
+NXP Semiconductors,Technology,NXPI
+O'Reilly Automotive,Consumer Discretionary,ORLY
+Old Dominion Freight Line,Industrials,ODFL
+Paccar,Consumer Discretionary,PCAR
+Palantir Technologies,Technology,PLTR
+Palo Alto Networks,Technology,PANW
+Paychex,Industrials,PAYX
+PayPal,Industrials,PYPL
+PDD Holdings,Technology,PDD
+PepsiCo,Consumer Staples,PEP
+Qualcomm,Technology,QCOM
+Regeneron Pharmaceuticals,Health Care,REGN
+Rocket Lab,Industrials,RKLB
+Roper Technologies,Technology,ROP
+Ross Stores,Consumer Discretionary,ROST
+Sandisk,Technology,SNDK
+Seagate Technology,Technology,STX
+Shopify,Technology,SHOP
+SpaceX,Telecommunications,SPCX
+Starbucks,Consumer Discretionary,SBUX
+Synopsys,Technology,SNPS
+T-Mobile US,Telecommunications,TMUS
+Take-Two Interactive,Consumer Discretionary,TTWO
+Teradyne,Technology,TER
+"Tesla, Inc.",Consumer Discretionary,TSLA
+Texas Instruments,Technology,TXN
+Thomson Reuters,Technology,TRI
+Vertex Pharmaceuticals,Health Care,VRTX
+Walmart,Consumer Discretionary,WMT
+Warner Bros. Discovery,Consumer Discretionary,WBD
+Western Digital,Technology,WDC
+"Workday, Inc.",Technology,WDAY
+Xcel Energy,Utilities,XEL
+""",
+    "dow30": """Company Name,Industry,Symbol
+Apple,Technology,AAPL
+NVIDIA,Technology,NVDA
+Microsoft,Technology,MSFT
+Amazon.com,Consumer Discretionary,AMZN
+Walmart,Consumer Staples,WMT
+JPMorgan Chase,Financials,JPM
+Visa,Financials,V
+Johnson & Johnson,Health Care,JNJ
+Coca-Cola,Consumer Staples,KO
+Chevron,Energy,CVX
+Cisco Systems,Technology,CSCO
+Procter & Gamble,Consumer Staples,PG
+Merck,Health Care,MRK
+UnitedHealth Group,Health Care,UNH
+Home Depot,Consumer Discretionary,HD
+Caterpillar,Industrials,CAT
+Goldman Sachs Group,Financials,GS
+Amgen,Health Care,AMGN
+International Business Machines,Technology,IBM
+American Express,Financials,AXP
+Walt Disney,Communication Services,DIS
+McDonald's,Consumer Discretionary,MCD
+Verizon Communications,Communication Services,VZ
+Salesforce,Technology,CRM
+Boeing,Industrials,BA
+3M,Industrials,MMM
+Sherwin-Williams,Materials,SHW
+Travelers Companies,Financials,TRV
+Honeywell International,Industrials,HON
+Nike,Consumer Discretionary,NKE
+""",
+}
+
+
 def _wikipedia_constituents(url, size_range):
     """Current members from a Wikipedia components table: DataFrame
     [Symbol, Company Name, Industry], or None if the page cannot be read or
     does not look right (wrong size, no ticker column)."""
     import requests
     try:
-        html = requests.get(url, headers={"User-Agent": NSE_HEADERS["User-Agent"]}, timeout=10).text
-        tables = pd.read_html(io.StringIO(html))
+        # Wikipedia asks automated clients to identify themselves; a plain
+        # browser identity from a cloud server is often refused.
+        ua = "SwingTradingChart/1.0 (https://swingtradingchart.streamlit.app; stock dashboard)"
+        r = requests.get(url, headers={"User-Agent": ua}, timeout=10)
+        r.raise_for_status()
+        tables = pd.read_html(io.StringIO(r.text))
     except Exception:
         return None
     lo, hi = size_range
@@ -196,11 +341,23 @@ def load_constituents(key, refresh=True):
         df = _wikipedia_constituents(url, size)
         if df is not None:
             source = "current list from Wikipedia"
-    if df is None:
-        df = pd.read_csv(csv)
-        df["Symbol"] = df["Symbol"].astype(str).str.strip()
-        df["Industry"] = df.get("Industry", pd.Series("Other", index=df.index)).fillna("Other")
-        source = f"list bundled with the app ({os.path.basename(csv)})"
+    if df is None and os.path.exists(csv):
+        try:
+            df = pd.read_csv(csv)
+            source = f"list bundled with the app ({os.path.basename(csv)})"
+        except Exception:
+            df = None
+    if df is None and key in EMBEDDED_LISTS:
+        df = pd.read_csv(io.StringIO(EMBEDDED_LISTS[key]))
+        source = "list built into the app"
+    if df is None or "Symbol" not in df.columns or df.empty:
+        raise DataUnavailable(
+            f"Could not load the {key} member list: Wikipedia did not answer and "
+            f"{os.path.basename(csv)} is missing from the app folder.")
+    df["Symbol"] = df["Symbol"].astype(str).str.strip()
+    if "Company Name" not in df.columns:
+        df["Company Name"] = df["Symbol"]
+    df["Industry"] = df.get("Industry", pd.Series("Other", index=df.index)).fillna("Other")
     df["Yahoo"] = [_yahoo_symbol(t, suffix) for t in df["Symbol"]]
     return df[["Symbol", "Company Name", "Industry", "Yahoo"]], source
 
