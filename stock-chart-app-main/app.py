@@ -110,6 +110,7 @@ US_INDICES = {
     "^XAU": ("Gold & Silver Miners (PHLX)", "Thematic"),
     "^OSX": ("Oil Services (PHLX)", "Thematic"),
     "^XOI": ("Oil (NYSE Arca)", "Thematic"),
+    "FNGS": ("NYSE FANG+ (FNGS ETN)", "Thematic"),   # tracks the NYSE FANG+ index
     # themes with no index on Yahoo -> leading ETF
     "BOTZ": ("Robotics & AI (ETF)", "Thematic"),
     "CIBR": ("Cybersecurity (ETF)", "Thematic"),
@@ -125,9 +126,16 @@ US_INDICES = {
     "FINX": ("Fintech (ETF)", "Thematic"),
     "BLOK": ("Blockchain (ETF)", "Thematic"),
     "ARKK": ("Disruptive Innovation (ARKK)", "Thematic"),
+    "AIQ": ("AI & Technology (ETF)", "Thematic"),
+    "SOXX": ("Semiconductors (iShares SOXX)", "Thematic"),
+    "XOP": ("Oil & Gas E&P (ETF)", "Thematic"),
+    "XME": ("Metals & Mining (ETF)", "Thematic"),
+    "KIE": ("Insurance (ETF)", "Thematic"),
+    "XRT": ("Retail (ETF)", "Thematic"),
     # broad market, for comparison
     "^GSPC": ("S&P 500", "Broad market"),
     "^NDX": ("Nasdaq-100", "Broad market"),
+    "^IXIC": ("Nasdaq Composite", "Broad market"),
     "^DJI": ("Dow Jones Industrial", "Broad market"),
     "^RUT": ("Russell 2000", "Broad market"),
     "^SP400": ("S&P MidCap 400", "Broad market"),
