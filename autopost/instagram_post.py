@@ -126,7 +126,7 @@ def nse_bars(start, end, ok, label):
     figs = [(charts.ranked_bars(df[df["Category"] == c], f"NSE {c} Indices: {label}"), f"nse-{c.lower()}")
             for c in ("Sectoral", "Thematic") if (df["Category"] == c).any()]
     top, bottom = movers(df[df["Category"] == "Sectoral"])
-    return figs, f"🇮🇳 NSE sectors {label}\n🟢 {top}\n🔴 {bottom}"
+    return figs, f"🇮🇳 NSE sectors {label}\n⬆️ Best: {top}\n⬇️ Worst: {bottom}"
 
 
 def nifty50_bars(start, end, ok, label):
@@ -134,7 +134,7 @@ def nifty50_bars(start, end, ok, label):
     names = dict(zip(cons["Yahoo"], cons["Symbol"]))
     df = check_fresh(core.range_stats(names, str(start), str(end)), ok, "Nifty 50")
     top, bottom = movers(df)
-    return charts.ranked_bars(df, f"Nifty 50 Stocks: {label}"), f"📈 Nifty 50 stocks\n🟢 {top}\n🔴 {bottom}"
+    return charts.ranked_bars(df, f"Nifty 50 Stocks: {label}"), f"📈 Nifty 50 stocks\n⬆️ Best: {top}\n⬇️ Worst: {bottom}"
 
 
 def nse_rankings(ref, ok, which_list=("strongest", "weakest"), n=5):
@@ -160,7 +160,7 @@ def us_bars(start, end, ok, label):
             for c, t in (("Sectoral", "Sectors"), ("Thematic", "Themes"))
             if (df["Category"] == c).any()]
     top, bottom = movers(df)
-    return figs, f"🇺🇸 USA sectors & themes {label}\n🟢 {top}\n🔴 {bottom}"
+    return figs, f"🇺🇸 USA sectors & themes {label}\n⬆️ Best: {top}\n⬇️ Worst: {bottom}"
 
 
 def range_bars(names, start, end, ok, title, what, emoji, n=3):
@@ -168,7 +168,7 @@ def range_bars(names, start, end, ok, title, what, emoji, n=3):
     commodities, currencies); rows not dated the expected day are left out."""
     df = check_fresh(core.range_stats(names, str(start), str(end)), ok, what)
     top, bottom = movers(df, n)
-    return charts.ranked_bars(df, title), f"{emoji} {what}\n🟢 {top}\n🔴 {bottom}"
+    return charts.ranked_bars(df, title), f"{emoji} {what}\n⬆️ Best: {top}\n⬇️ Worst: {bottom}"
 
 
 def world_rankings(ref, ok, which_list=("strongest", "weakest"), n=5):
