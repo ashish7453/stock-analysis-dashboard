@@ -1,0 +1,79 @@
+# Posts the dashboard's charts to Instagram on a schedule.
+# Setup and how to test: autopost/README.md
+name: Instagram posts
+
+on:
+  schedule:                       # times are UTC (IST = UTC + 5:30)
+    - cron: "15 14 * * 1-5"       # India daily   Mon-Fri 7:45 PM IST
+    - cron: "0 2 * * 2-6"         # USA daily     Tue-Sat 7:30 AM IST (previous US session)
+    - cron: "30 3 * * 6"          # Weekly recap  Saturday 9:00 AM IST
+  workflow_dispatch:              # "Run workflow" button on the Actions tab
+    inputs:
+      mode:
+        description: Which post
+        type: choice
+        options: [india-daily, us-daily, weekly]
+        default: india-daily
+      dry_run:
+        description: Dry run (make the images only, don't post; download them from the run's Artifacts)
+        type: boolean
+        default: true
+      force:
+        description: Post again even if this post was already made
+        type: boolean
+        default: false
+
+permissions:
+  contents: write                 # to push the images to the social-posts branch
+
+concurrency:
+  group: instagram
+  cancel-in-progress: false
+
+jobs:
+  post:
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+          cache: pip
+
+      - name: Install
+        run: |
+          pip install -r requirements.txt "kaleido>=1.0" pillow
+          plotly_get_chrome -y || true     # chart-to-image needs Chrome (usually already on the runner)
+
+      - name: Pick post
+        id: pick
+        run: |
+          case "${{ github.event.schedule }}" in
+            "15 14 * * 1-5") m=india-daily ;;
+            "0 2 * * 2-6")   m=us-daily ;;
+            "30 3 * * 6")    m=weekly ;;
+            *)               m="${{ inputs.mode }}" ;;
+          esac
+          echo "mode=$m" >> "$GITHUB_OUTPUT"
+
+      - name: Make charts and post
+        env:
+          IG_ACCESS_TOKEN: ${{ secrets.IG_ACCESS_TOKEN }}
+          IG_USER_ID: ${{ secrets.IG_USER_ID }}
+          GH_PAT: ${{ secrets.GH_PAT }}
+        run: |
+          args="--mode ${{ steps.pick.outputs.mode }}"
+          if [ "${{ inputs.dry_run }}" = "true" ]; then args="$args --dry-run"; fi
+          if [ "${{ inputs.force }}" = "true" ]; then args="$args --force"; fi
+          python autopost/instagram_post.py $args
+
+      - name: Keep the images
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: instagram-${{ steps.pick.outputs.mode }}
+          path: social-out/
+          if-no-files-found: ignore
+          retention-days: 14
