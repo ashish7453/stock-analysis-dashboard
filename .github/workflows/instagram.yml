@@ -7,12 +7,14 @@ on:
     - cron: "15 14 * * 1-5"       # India daily   Mon-Fri 7:45 PM IST
     - cron: "0 2 * * 2-6"         # USA daily     Tue-Sat 7:30 AM IST (previous US session)
     - cron: "30 3 * * 6"          # Weekly recap  Saturday 9:00 AM IST
+    - cron: "30 2 * * 2-6"        # Global daily  Tue-Sat 8:00 AM IST (world indices, commodities)
+    - cron: "0 4 * * 6"           # Global weekly Saturday 9:30 AM IST (+ currencies, 1 month)
   workflow_dispatch:              # "Run workflow" button on the Actions tab
     inputs:
       mode:
         description: Which post
         type: choice
-        options: [india-daily, us-daily, weekly]
+        options: [india-daily, us-daily, weekly, global-daily, global-weekly]
         default: india-daily
       dry_run:
         description: Dry run (make the images only, don't post; download them from the run's Artifacts)
@@ -54,6 +56,8 @@ jobs:
             "15 14 * * 1-5") m=india-daily ;;
             "0 2 * * 2-6")   m=us-daily ;;
             "30 3 * * 6")    m=weekly ;;
+            "30 2 * * 2-6")  m=global-daily ;;
+            "0 4 * * 6")     m=global-weekly ;;
             *)               m="${{ inputs.mode }}" ;;
           esac
           echo "mode=$m" >> "$GITHUB_OUTPUT"
