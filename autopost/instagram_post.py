@@ -47,7 +47,12 @@ import charts           # noqa: E402
 IST, NY = ZoneInfo("Asia/Kolkata"), ZoneInfo("America/New_York")
 W, H = charts.SOCIAL_SIZES["Instagram portrait (1080×1350)"]
 FOOTER = "rscreener.com"
-GRAPH = "https://graph.instagram.com/v23.0"
+# Two kinds of Instagram token work:
+#  - Instagram Login token ("IG..."), 60 days, refreshed on each run -> graph.instagram.com
+#  - Meta Unified/Facebook Login system-user token ("EAA..."), never expires -> graph.facebook.com
+#    (needs IG_USER_ID = the Instagram business account ID)
+GRAPH_IG = "https://graph.instagram.com/v23.0"
+GRAPH_FB = "https://graph.facebook.com/v23.0"
 BRANCH = "social-posts"        # branch that holds the images Instagram downloads
 DISCLAIMER = "For education only, not investment advice."
 TAGS_IN = "#Nifty #Nifty50 #NSE #SectorRotation #IndianStockMarket #StockMarketIndia #SwingTrading"
@@ -318,10 +323,17 @@ class Instagram:
         if not self.token:
             raise SystemExit("IG_ACCESS_TOKEN is not set: add it under the repo's Settings -> "
                              "Secrets and variables -> Actions (see autopost/README.md).")
-        self.uid = os.environ.get("IG_USER_ID", "").strip() or "me"
+        self.facebook = not self.token.startswith("IG")
+        self.graph = GRAPH_FB if self.facebook else GRAPH_IG
+        self.uid = os.environ.get("IG_USER_ID", "").strip()
+        if not self.uid:
+            if self.facebook:
+                raise SystemExit("IG_USER_ID is not set: a Meta system-user token needs the "
+                                 "Instagram business account ID (see autopost/README.md).")
+            self.uid = "me"
 
     def call(self, method, path, **params):
-        r = requests.request(method, f"{GRAPH}/{path}",
+        r = requests.request(method, f"{self.graph}/{path}",
                              params={**params, "access_token": self.token}, timeout=60)
         try:
             data = r.json()
@@ -333,7 +345,10 @@ class Instagram:
 
     def refresh_token(self):
         """Long-lived tokens last 60 days; refreshing on every run keeps them alive.
-        If a GH_PAT secret is set, a changed token is saved back to the secret."""
+        If a GH_PAT secret is set, a changed token is saved back to the secret.
+        System-user tokens never expire, so they are left alone."""
+        if self.facebook:
+            return
         try:
             r = requests.get("https://graph.instagram.com/refresh_access_token",
                              params={"grant_type": "ig_refresh_token", "access_token": self.token},
