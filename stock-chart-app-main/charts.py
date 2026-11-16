@@ -271,23 +271,27 @@ def _sideways_bars(fig, h):
         textfont=dict(size=fs), customdata=[hov[i] for i in idx],
         hovertemplate="<b>%{y}</b><br>Gain %{x:+.2f}%<br>%{customdata}<extra></extra>"))
     lo, hi = min(0, min(vals)), max(0, max(vals))
-    new.update_xaxes(ticksuffix="%", zeroline=True, zerolinewidth=1.5, range=_range(lo, hi, 0.3))
+    span = (hi - lo) or 1
+    # room for the value labels outside both ends, so "-3.15%" never touches the names
+    new.update_xaxes(ticksuffix="%", zeroline=True, zerolinewidth=1.5,
+                     range=[lo - (0.28 * span if lo < 0 else 0), hi + (0.22 * span if hi > 0 else 0)])
     new.update_yaxes(autorange="reversed", type="category", tickfont=dict(size=fs))
     new.update_layout(title=fig.layout.title, font=fig.layout.font, bargap=0.2, showlegend=False)
     return new, note
 
 
-def social_layout(fig, width, height, footer=None, scale=2):
+def social_layout(fig, width, height, footer=None, scale=2, sideways_min=13):
     """Re-lay a chart out for a fixed-size image post: drawn at width/scale x
     height/scale screen pixels (saved at `scale`x, so text stays readable),
     white background, black text, the dates and `footer` (e.g. the website)
     on a second title line, colour bar along the bottom. Long column charts
-    become horizontal bars. Returns the figure to show (may be a new one)."""
+    (at least `sideways_min` bars) become horizontal bars. Returns the figure
+    to show (may be a new one)."""
     w, h = width // scale, height // scale
     note = ""
     bars = [t for t in fig.data if t.type == "bar"]
     if (len(fig.data) == 1 and bars and (bars[0].orientation or "v") == "v"
-            and len(bars[0].x) > 12):
+            and len(bars[0].x) >= sideways_min):
         fig, note = _sideways_bars(fig, h)
     title = fig.layout.title.text or ""
     head, tail = (title.split(": ", 1) if ": " in title and "<br>" not in title
