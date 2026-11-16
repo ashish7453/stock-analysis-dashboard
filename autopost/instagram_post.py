@@ -141,12 +141,15 @@ def nse_rankings(ref, ok, which_list=("strongest", "weakest"), n=5):
     raw, info = core.nse_index_returns(str(ref), ex="NSE")
     if not ok(pd.Timestamp(info["last_day"]).date()):
         raise Skip(f"NSE rankings: latest data is {info['last_day']}")
-    df = short_nse(core.rank_returns(raw[raw["Category"] == "Sectoral"]))
+    # Sectoral and thematic indices ranked together
+    df = short_nse(core.rank_returns(raw[raw["Category"].isin(["Sectoral", "Thematic"])]))
     asof = pd.Timestamp(info["last_day"])
-    figs = [charts.window_bars(df, w, n=n, title_prefix=f"NSE Sector Rankings ({asof:%d %b %Y}): ")
+    figs = [charts.window_bars(df, w, n=n,
+                               title_prefix=f"NSE Sectoral & Thematic ({asof:%d %b %Y}): ")
             for w in which_list]
     best = ", ".join(df.sort_values("Sum of Ranks")["Name"].head(3))
-    return [f for f in figs if f is not None], f"🏆 Strongest NSE sectors over 30/60/90 days: {best}"
+    return ([f for f in figs if f is not None],
+            f"🏆 Strongest NSE sectoral & thematic indices over 30/60/90 days: {best}")
 
 
 def us_bars(start, end, ok, label):
