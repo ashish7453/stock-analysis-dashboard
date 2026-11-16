@@ -10,6 +10,12 @@ Run by GitHub Actions (.github/workflows/instagram.yml) on a schedule:
   weekly       Saturday ~9:00 AM IST      the Mon-Fri week as bar charts: NSE sectoral,
                                           NSE thematic, Nifty 50, USA sectors, USA
                                           themes, NSE sector rankings
+  global-daily Tue-Sat ~8:00 AM IST       world indices and commodities for the day that
+                                          just closed, world indices 30/60/90-day
+                                          strongest & weakest
+  global-weekly Saturday ~9:30 AM IST     world indices and commodities for the week,
+                                          currencies vs USD over one month, world
+                                          indices 30/60/90-day strongest
 
 Safety checks: nothing is posted on market holidays (the data must be dated the
 expected day), and each post is made only once (posted.json on the
@@ -57,6 +63,7 @@ BRANCH = "social-posts"        # branch that holds the images Instagram download
 DISCLAIMER = "For education only, not investment advice."
 TAGS_IN = "#Nifty #Nifty50 #NSE #SectorRotation #IndianStockMarket #StockMarketIndia #SwingTrading"
 TAGS_US = "#StockMarket #SP500 #Nasdaq #SectorRotation #ETF #USStocks #Investing"
+TAGS_GLOBAL = "#GlobalMarkets #WorldIndices #StockMarket #Commodities #Gold #CrudeOil #Nifty #Investing"
 
 
 class Skip(Exception):
@@ -156,6 +163,26 @@ def us_bars(start, end, ok, label):
     return figs, f"🇺🇸 USA sectors & themes {label}\n🟢 {top}\n🔴 {bottom}"
 
 
+def range_bars(names, start, end, ok, title, what, emoji, n=3):
+    """Ranked bars for a {symbol: name} list over a date range (world indices,
+    commodities, currencies); rows not dated the expected day are left out."""
+    df = check_fresh(core.range_stats(names, str(start), str(end)), ok, what)
+    top, bottom = movers(df, n)
+    return charts.ranked_bars(df, title), f"{emoji} {what}\n🟢 {top}\n🔴 {bottom}"
+
+
+def world_rankings(ref, ok, which_list=("strongest", "weakest"), n=5):
+    """World indices ranked on 30/60/90-day returns (the World Indices tool)."""
+    df = core.compute_index_returns(core.WORLD_INDICES, reference_date=str(ref))
+    last = max(pd.Timestamp(x).date() for x in df["Last Date"].dropna())
+    if not ok(last):
+        raise Skip(f"World rankings: latest data is {last}")
+    figs = [charts.window_bars(df, w, n=n, title_prefix=f"World Indices ({last:%d %b %Y}): ")
+            for w in which_list]
+    best = ", ".join(df.dropna(subset=["Sum of Ranks"]).sort_values("Sum of Ranks")["Name"].head(3))
+    return [f for f in figs if f is not None], f"🏆 Strongest world indices over 30/60/90 days: {best}"
+
+
 # -------------------------------------------------------------------- posts
 def build(mode, out):
     """Make the images for `mode` in `out`. Returns (key, caption, [jpg paths])."""
@@ -243,6 +270,50 @@ def build(mode, out):
             attempt(lbl, fn)
         head = f"🗓️ Week in markets, {lab}"
         tags = "#WeeklyRecap #Nifty #NSE #IndianStockMarket #SP500 #StockMarket #SectorRotation #SwingTrading"
+    elif mode in ("global-daily", "global-weekly"):
+        if mode == "global-daily":
+            end = dt.datetime.now(NY).date()           # the session that just closed in New York
+            if end.weekday() >= 5:
+                raise Skip("weekend in New York")
+            start, key, lab = end, f"global-daily:{end}", day_label(end)
+            ok = lambda d, e=end: d == e
+            head, extra = f"🌍 Global markets, {lab}", []
+        else:
+            end = now_ist.date() - dt.timedelta(days=(now_ist.weekday() - 4) % 7)   # last Friday
+            start = end - dt.timedelta(days=4)
+            key, lab = f"global-weekly:{start}", week_label(start, end)
+            ok = lambda d, a=start, b=end: a <= d <= b
+            head = f"🌍 Global markets this week, {lab}"
+            # Currencies: one month to Friday (base = close one month earlier)
+            m0 = (pd.Timestamp(end) - pd.DateOffset(months=1) + pd.Timedelta(days=1)).date()
+            extra = [("Currencies vs USD", core.CURRENCIES, m0,
+                      f"Currencies vs USD, 1 month: {m0 - dt.timedelta(days=1):%d %b} to {end:%d %b %Y}",
+                      "Currencies vs USD (1 month)", "💱", "currencies-1m")]
+
+        def g():
+            fig, txt = range_bars(core.WORLD_INDICES, start, end, ok, f"World Indices: {lab}",
+                                  "World indices", "🌍")
+            add(fig, "world-indices"); parts.append(txt)
+
+        def m():
+            fig, txt = range_bars(core.COMMODITIES, start, end, ok, f"Commodities: {lab}",
+                                  "Commodities", "🛢️")
+            add(fig, "commodities"); parts.append(txt)
+
+        def fx():
+            for _, names, s0, title, what, emo, nm in extra:
+                fig, txt = range_bars(names, s0, end, ok, title, what, emo)
+                add(fig, nm); parts.append(txt)
+
+        def r():
+            which = ("strongest", "weakest") if mode == "global-daily" else ("strongest",)
+            figs, txt = world_rankings(end, ok, which)
+            for f, w in zip(figs, which):
+                add(f, f"world-rank-{w}")
+            parts.append(txt)
+        for lbl, fn in (("World indices", g), ("Commodities", m), ("Currencies", fx), ("World rankings", r)):
+            attempt(lbl, fn)
+        tags = TAGS_GLOBAL + (" #Forex #WeeklyRecap" if mode == "global-weekly" else "")
     else:
         raise SystemExit(f"unknown mode {mode}")
 
@@ -402,7 +473,7 @@ class Instagram:
 # --------------------------------------------------------------------- main
 def main():
     ap = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
-    ap.add_argument("--mode", required=True, choices=["india-daily", "us-daily", "weekly"])
+    ap.add_argument("--mode", required=True, choices=["india-daily", "us-daily", "weekly", "global-daily", "global-weekly"])
     ap.add_argument("--dry-run", action="store_true", help="make the images and caption only")
     ap.add_argument("--force", action="store_true", help="post even if this post was already made")
     ap.add_argument("--out", default=str(ROOT / "social-out"))
