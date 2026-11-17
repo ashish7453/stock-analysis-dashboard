@@ -3,12 +3,14 @@
 name: Instagram posts
 
 on:
-  schedule:                       # times are UTC (IST = UTC + 5:30)
-    - cron: "15 14 * * 1-5"       # India daily   Mon-Fri 7:45 PM IST
-    - cron: "0 2 * * 2-6"         # USA daily     Tue-Sat 7:30 AM IST (previous US session)
-    - cron: "30 3 * * 6"          # Weekly recap  Saturday 9:00 AM IST
-    - cron: "30 2 * * 2-6"        # Global daily  Tue-Sat 8:00 AM IST (world indices, commodities)
-    - cron: "0 4 * * 6"           # Global weekly Saturday 9:30 AM IST (+ currencies, 1 month)
+  schedule:                       # times are UTC (IST = UTC + 5:30); odd minutes on purpose:
+                                  # GitHub delays runs at :00/:30 the most. Runs can still start late;
+                                  # the script always posts the last finished session.
+    - cron: "13 14 * * 1-5"       # India daily   Mon-Fri 7:43 PM IST
+    - cron: "7 2 * * 2-6"         # USA daily     Tue-Sat 7:37 AM IST (previous US session)
+    - cron: "3 3 * * 6"          # Weekly recap  Saturday 8:33 AM IST
+    - cron: "37 2 * * 2-6"        # Global daily  Tue-Sat 8:07 AM IST (world indices, commodities)
+    - cron: "33 3 * * 6"           # Global weekly Saturday 9:03 AM IST (+ currencies, 1 month)
   workflow_dispatch:              # "Run workflow" button on the Actions tab
     inputs:
       mode:
@@ -53,11 +55,11 @@ jobs:
         id: pick
         run: |
           case "${{ github.event.schedule }}" in
-            "15 14 * * 1-5") m=india-daily ;;
-            "0 2 * * 2-6")   m=us-daily ;;
-            "30 3 * * 6")    m=weekly ;;
-            "30 2 * * 2-6")  m=global-daily ;;
-            "0 4 * * 6")     m=global-weekly ;;
+            "13 14 * * 1-5") m=india-daily ;;
+            "7 2 * * 2-6")   m=us-daily ;;
+            "3 3 * * 6")    m=weekly ;;
+            "37 2 * * 2-6")  m=global-daily ;;
+            "33 3 * * 6")     m=global-weekly ;;
             *)               m="${{ inputs.mode }}" ;;
           esac
           echo "mode=$m" >> "$GITHUB_OUTPUT"
