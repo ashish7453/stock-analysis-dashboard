@@ -246,7 +246,7 @@ SOCIAL_SIZES = {          # name -> (width, height) of the final image in pixels
 }
 
 
-def _sideways_bars(fig, h):
+def _sideways_bars(fig, h, max_rows=None):
     """A long single-series column chart (e.g. 50 stocks) turned into
     horizontal bars, best at the top, so each name gets a readable row on a
     phone-shaped image. If there are more rows than fit, the middle is
@@ -256,14 +256,14 @@ def _sideways_bars(fig, h):
     names, vals = list(tr.x), [float(v) for v in tr.y]
     colors = list(tr.marker.color) if tr.marker.color is not None else None
     hov = list(tr.customdata) if tr.customdata is not None else [""] * len(names)
-    fit = max(10, int((h - 150) / 15))           # rows that stay readable
+    fit = max_rows or max(10, int((h - 150) / 15))   # rows that stay readable
     idx, note = list(range(len(names))), ""
     if len(names) > fit:
         k = fit // 2
         idx = idx[:k] + idx[-k:]
         note = f"Top {k} and bottom {k} of {len(names)}"
     rows = len(idx)
-    fs = int(min(13, max(9, (h - 150) / rows * 0.62)))
+    fs = int(min(13, max(7 if max_rows else 9, (h - 150) / rows * 0.62)))
     new = go.Figure(go.Bar(
         y=[names[i] for i in idx], x=[vals[i] for i in idx], orientation="h",
         marker_color=[colors[i] for i in idx] if colors else None, marker_line_width=0,
@@ -280,7 +280,7 @@ def _sideways_bars(fig, h):
     return new, note
 
 
-def social_layout(fig, width, height, footer=None, scale=2, sideways_min=13):
+def social_layout(fig, width, height, footer=None, scale=2, sideways_min=13, max_rows=None):
     """Re-lay a chart out for a fixed-size image post: drawn at width/scale x
     height/scale screen pixels (saved at `scale`x, so text stays readable),
     white background, black text, the dates and `footer` (e.g. the website)
@@ -292,7 +292,7 @@ def social_layout(fig, width, height, footer=None, scale=2, sideways_min=13):
     bars = [t for t in fig.data if t.type == "bar"]
     if (len(fig.data) == 1 and bars and (bars[0].orientation or "v") == "v"
             and len(bars[0].x) >= sideways_min):
-        fig, note = _sideways_bars(fig, h)
+        fig, note = _sideways_bars(fig, h, max_rows)
     title = fig.layout.title.text or ""
     head, tail = (title.split(": ", 1) if ": " in title and "<br>" not in title
                   else (title, ""))
