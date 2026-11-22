@@ -774,7 +774,7 @@ def finder_stock_list(key):
             st.info("Choose a CSV file with a 'Symbol' column, e.g. an index list from niftyindices.com.")
             return None, ""
         try:
-            names = core.symbols_from_csv(pd.read_csv(up), suffix, limit=1500)
+            names = core.symbols_from_csv(pd.read_csv(up), suffix, limit=5000)
         except Exception as e:
             st.error(f"Could not read the CSV: {e}")
             return None, ""
